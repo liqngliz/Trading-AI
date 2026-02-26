@@ -14,7 +14,7 @@ public static class ServiceCollectionExtensions
         services.AddHttpClient("TwelveData", client =>
         {
             client.BaseAddress = twelveDataBaseUri;
-            client.Timeout = TimeSpan.FromSeconds(30);
+            client.Timeout = TimeSpan.FromSeconds(60);
         });
 
         return services;
