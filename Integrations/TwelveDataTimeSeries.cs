@@ -99,7 +99,9 @@ public static class TwelveTimeSeriesParamExtensions
             param.StartDate,
             param.EndDate,
             param.Interval);
-
+        Console.WriteLine($"Expected timestamps count: {expectedTimestamps.Count}");
+        Console.WriteLine($"Cached timestamps count: {intervalBucket.Count}");
+        Console.WriteLine($"Expected last: {expectedTimestamps.LastOrDefault()}");
         var missingRanges = BuildMissingRanges(expectedTimestamps, intervalBucket);
 
         foreach (var missingRange in missingRanges)
@@ -252,6 +254,8 @@ public static class TwelveTimeSeriesParamExtensions
 
         for (var current = start; current <= end; current = current.Add(step))
         {
+            if(current.Add(step) >= end && current != end)
+                break;
             result.Add(current);
         }
 
@@ -296,25 +300,31 @@ public static class TwelveTimeSeriesParamExtensions
 
             previous = current;
         }
-
+   
         ranges.Add((rangeStart, previous));
         return ranges;
     }
 
     private static TimeSpan ParseInterval(string interval)
     {
-        var valuePart = new string(interval.TakeWhile(char.IsDigit).ToArray());
-        var unitPart = new string(interval.SkipWhile(char.IsDigit).ToArray()).ToLowerInvariant();
-
-        if (!int.TryParse(valuePart, out var value) || value <= 0)
-            throw new InvalidOperationException($"Unsupported interval '{interval}'.");
-
-        return unitPart switch
+        return interval switch
         {
-            "min" => TimeSpan.FromMinutes(value),
-            "h" => TimeSpan.FromHours(value),
-            "day" => TimeSpan.FromDays(value),
-            _ => throw new InvalidOperationException($"Unsupported interval '{interval}'.")
+            "1min" => TimeSpan.FromMinutes(1),
+            "5min" => TimeSpan.FromMinutes(5),
+            "15min" => TimeSpan.FromMinutes(15),
+            "30min" => TimeSpan.FromMinutes(30),
+            "45min" => TimeSpan.FromMinutes(45),
+            "1h" => TimeSpan.FromHours(1),
+            "2h" => TimeSpan.FromHours(2),
+            "4h" => TimeSpan.FromHours(4),
+            "5h" => TimeSpan.FromHours(5),
+            "1day" => TimeSpan.FromDays(1),
+            "1week" => TimeSpan.FromDays(7),
+            "1month" => throw new InvalidOperationException(
+                "Interval '1month' is not supported by this implementation because month length is variable."),
+            _ => throw new InvalidOperationException(
+                $"Unsupported interval '{interval}'. Supported values: " +
+                "1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 5h, 1day, 1week.")
         };
     }
 
