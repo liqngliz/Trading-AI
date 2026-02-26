@@ -16,7 +16,8 @@ public readonly record struct TimeSeriesValue(
     decimal Open,
     decimal High,
     decimal Low,
-    decimal Close);
+    decimal Close,
+    bool IsFilled);
 
 public sealed record TimeSeriesCacheDocument
 {
@@ -126,7 +127,11 @@ public static class TwelveTimeSeriesParamExtensions
             }
         }
 
-        if (missingRanges.Count > 0)
+        var filledMissingCount = FillMissingRanges(
+            expectedTimestamps,
+            intervalBucket);
+
+        if (missingRanges.Count > 0 || filledMissingCount > 0)
         {
             await param.Repository
                 .SaveAsync(cacheKey, cache, param.CancellationToken)
@@ -305,6 +310,70 @@ public static class TwelveTimeSeriesParamExtensions
         return ranges;
     }
 
+    private static int FillMissingRanges(
+        IReadOnlyList<DateTime> expectedTimestamps,
+        SortedDictionary<string, TimeSeriesValue> intervalBucket)
+    {
+        if (expectedTimestamps.Count == 0)
+            return 0;
+
+        var existingValues = expectedTimestamps
+            .Select((timestamp, index) =>
+            {
+                var hasValue = intervalBucket.TryGetValue(ToStorageKey(timestamp), out var value);
+                return new
+                {
+                    Timestamp = timestamp,
+                    Index = index,
+                    HasValue = hasValue,
+                    Value = value
+                };
+            })
+            .Where(x => x.HasValue)
+            .ToList();
+
+        if (existingValues.Count == 0)
+            return 0;
+
+        var firstExisting = existingValues[0];
+        var filledCount = 0;
+
+        for (var i = 0; i < firstExisting.Index; i++)
+        {
+            var timestamp = expectedTimestamps[i];
+            intervalBucket[ToStorageKey(timestamp)] = CreateFilledValue(timestamp, firstExisting.Value);
+            filledCount++;
+        }
+
+        var lastKnown = firstExisting.Value;
+
+        for (var i = firstExisting.Index + 1; i < expectedTimestamps.Count; i++)
+        {
+            var timestamp = expectedTimestamps[i];
+            var storageKey = ToStorageKey(timestamp);
+
+            if (intervalBucket.TryGetValue(storageKey, out var existingValue))
+            {
+                lastKnown = existingValue;
+                continue;
+            }
+
+            intervalBucket[storageKey] = CreateFilledValue(timestamp, lastKnown);
+            filledCount++;
+        }
+
+        return filledCount;
+    }
+
+    private static TimeSeriesValue CreateFilledValue(DateTime timestamp, TimeSeriesValue source) =>
+        new(
+            Datetime: timestamp,
+            Open: source.Open,
+            High: source.High,
+            Low: source.Low,
+            Close: source.Close,
+            IsFilled: true);
+
     private static TimeSpan ParseInterval(string interval)
     {
         return interval switch
@@ -349,7 +418,8 @@ public static class TwelveTimeSeriesParamExtensions
                 Open: ParseDecimal(item, "open"),
                 High: ParseDecimal(item, "high"),
                 Low: ParseDecimal(item, "low"),
-                Close: ParseDecimal(item, "close"));
+                Close: ParseDecimal(item, "close"),
+                IsFilled: false);
         }
 
         return result;
@@ -384,7 +454,8 @@ public static class TwelveTimeSeriesParamExtensions
                 Open: decimal.Parse(parts[1], CultureInfo.InvariantCulture),
                 High: decimal.Parse(parts[2], CultureInfo.InvariantCulture),
                 Low: decimal.Parse(parts[3], CultureInfo.InvariantCulture),
-                Close: decimal.Parse(parts[4], CultureInfo.InvariantCulture));
+                Close: decimal.Parse(parts[4], CultureInfo.InvariantCulture),
+                IsFilled: false);
         }
 
         return result;

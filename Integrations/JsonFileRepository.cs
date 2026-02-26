@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Integrations.TwelveData;
 
@@ -17,7 +18,11 @@ public sealed class JsonFileRepository<T> : IRepository<T>
 
         _jsonOptions = new JsonSerializerOptions
         {
-            WriteIndented = true
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true,
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.Never
         };
     }
 
