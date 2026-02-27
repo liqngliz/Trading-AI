@@ -119,7 +119,7 @@ public static class TwelveTimeSeriesParamExtensions
                 outputSize: param.OutputSize,
                 cancellationToken: param.CancellationToken);
 
-            var fetched = await GetSeriesFromApi(partialParam).ConfigureAwait(false);
+            var fetched = await GetSeriesFromApiUntilRangeStart(partialParam).ConfigureAwait(false);
 
             foreach (var kvp in fetched)
             {
@@ -184,31 +184,146 @@ public static class TwelveTimeSeriesParamExtensions
     {
         ArgumentNullException.ThrowIfNull(param);
 
-        var all = new Dictionary<DateTime, TimeSeriesValue>();
-        var batch = await param.GetSeries().ConfigureAwait(false);
-
-        while (batch.Count > 0)
-        {
-            var previousOldest = batch.Keys.Min();
-
-            foreach (var kvp in batch)
+        var cacheKey = param.Symbol;
+        var cache = await param.Repository
+            .GetAsync(cacheKey, param.CancellationToken)
+            .ConfigureAwait(false)
+            ?? new TimeSeriesCacheDocument
             {
-                all[kvp.Key] = kvp.Value;
-            }
+                Symbol = param.Symbol
+            };
 
-            var next = await param.GetNextSeries(batch).ConfigureAwait(false);
-
-            if (next.Count == 0)
-                break;
-
-            var nextOldest = next.Keys.Min();
-            if (nextOldest >= previousOldest)
-                break;
-
-            batch = next;
+        if (!cache.Intervals.TryGetValue(param.Interval, out var intervalBucket))
+        {
+            intervalBucket = new SortedDictionary<string, TimeSeriesValue>(StringComparer.Ordinal);
+            cache.Intervals[param.Interval] = intervalBucket;
         }
 
-        return all;
+        var step = ParseInterval(param.Interval);
+        var now = DateTime.UtcNow;
+
+        var nonFilledKeys = intervalBucket
+            .Where(x => !x.Value.IsFilled)
+            .Select(x => ParseStorageKey(x.Key))
+            .OrderBy(x => x)
+            .ToList();
+
+        if (nonFilledKeys.Count == 0)
+        {
+            var uncachedParam = new TwelveTimeSeriesParam(
+                httpClient: param.HttpClient,
+                repository: param.Repository,
+                apiKey: param.ApiKey,
+                symbol: param.Symbol,
+                startDate: param.StartDate,
+                endDate: now,
+                format: param.Format,
+                interval: param.Interval,
+                outputSize: param.OutputSize,
+                cancellationToken: param.CancellationToken);
+
+            return await uncachedParam.GetSeries().ConfigureAwait(false);
+        }
+
+        var earliestNonFilled = nonFilledKeys[0];
+        var latestNonFilled = nonFilledKeys[^1];
+
+        var backwardEnd = earliestNonFilled.AddTicks(-1);
+        if (param.StartDate <= backwardEnd)
+        {
+            var backwardParam = new TwelveTimeSeriesParam(
+                httpClient: param.HttpClient,
+                repository: param.Repository,
+                apiKey: param.ApiKey,
+                symbol: param.Symbol,
+                startDate: param.StartDate,
+                endDate: backwardEnd,
+                format: param.Format,
+                interval: param.Interval,
+                outputSize: param.OutputSize,
+                cancellationToken: param.CancellationToken);
+
+            await backwardParam.GetSeries().ConfigureAwait(false);
+        }
+
+        var forwardStart = latestNonFilled.Add(step);
+        if (forwardStart <= now)
+        {
+            var forwardParam = new TwelveTimeSeriesParam(
+                httpClient: param.HttpClient,
+                repository: param.Repository,
+                apiKey: param.ApiKey,
+                symbol: param.Symbol,
+                startDate: forwardStart,
+                endDate: now,
+                format: param.Format,
+                interval: param.Interval,
+                outputSize: param.OutputSize,
+                cancellationToken: param.CancellationToken);
+
+            await forwardParam.GetSeries().ConfigureAwait(false);
+        }
+
+        cache = await param.Repository
+            .GetAsync(cacheKey, param.CancellationToken)
+            .ConfigureAwait(false)
+            ?? cache;
+
+        if (!cache.Intervals.TryGetValue(param.Interval, out intervalBucket))
+        {
+            return new Dictionary<DateTime, TimeSeriesValue>();
+        }
+
+        return intervalBucket.ToDictionary(
+            x => ParseStorageKey(x.Key),
+            x => x.Value);
+    }
+
+    private static async Task<Dictionary<DateTime, TimeSeriesValue>> GetSeriesFromApiUntilRangeStart(
+        TwelveTimeSeriesParam param)
+    {
+        var result = new Dictionary<DateTime, TimeSeriesValue>();
+        var requestedStart = param.StartDate;
+        var currentEnd = param.EndDate;
+        DateTime? lastOldestFetched = null;
+
+        while (currentEnd >= requestedStart)
+        {
+            var pageParam = new TwelveTimeSeriesParam(
+                httpClient: param.HttpClient,
+                repository: param.Repository,
+                apiKey: param.ApiKey,
+                symbol: param.Symbol,
+                startDate: requestedStart,
+                endDate: currentEnd,
+                format: param.Format,
+                interval: param.Interval,
+                outputSize: param.OutputSize,
+                cancellationToken: param.CancellationToken);
+
+            var page = await GetSeriesFromApi(pageParam).ConfigureAwait(false);
+
+            if (page.Count == 0)
+                break;
+
+            foreach (var kvp in page)
+            {
+                result[kvp.Key] = kvp.Value;
+            }
+
+            var oldestFetched = page.Keys.Min();
+
+            if (oldestFetched <= requestedStart)
+                break;
+
+            if (lastOldestFetched.HasValue && oldestFetched >= lastOldestFetched.Value)
+                break;
+
+            lastOldestFetched = oldestFetched;
+            currentEnd = oldestFetched.AddTicks(-1);
+        }
+
+        return result;
     }
 
     private static async Task<Dictionary<DateTime, TimeSeriesValue>> GetSeriesFromApi(
@@ -249,7 +364,7 @@ public static class TwelveTimeSeriesParamExtensions
             : ParseCsv(content);
     }
 
-    private static List<DateTime> BuildExpectedTimestamps(
+    internal static List<DateTime> BuildExpectedTimestamps(
         DateTime start,
         DateTime end,
         string interval)
@@ -267,7 +382,7 @@ public static class TwelveTimeSeriesParamExtensions
         return result;
     }
 
-    private static List<(DateTime Start, DateTime End)> BuildMissingRanges(
+    internal static List<(DateTime Start, DateTime End)> BuildMissingRanges(
         IReadOnlyList<DateTime> expectedTimestamps,
         SortedDictionary<string, TimeSeriesValue> intervalBucket)
     {
@@ -310,7 +425,7 @@ public static class TwelveTimeSeriesParamExtensions
         return ranges;
     }
 
-    private static int FillMissingRanges(
+    internal static int FillMissingRanges(
         IReadOnlyList<DateTime> expectedTimestamps,
         SortedDictionary<string, TimeSeriesValue> intervalBucket)
     {
@@ -365,7 +480,7 @@ public static class TwelveTimeSeriesParamExtensions
         return filledCount;
     }
 
-    private static TimeSeriesValue CreateFilledValue(DateTime timestamp, TimeSeriesValue source) =>
+    internal static TimeSeriesValue CreateFilledValue(DateTime timestamp, TimeSeriesValue source) =>
         new(
             Datetime: timestamp,
             Open: source.Open,
@@ -374,7 +489,7 @@ public static class TwelveTimeSeriesParamExtensions
             Close: source.Close,
             IsFilled: true);
 
-    private static TimeSpan ParseInterval(string interval)
+    internal static TimeSpan ParseInterval(string interval)
     {
         return interval switch
         {
@@ -397,9 +512,12 @@ public static class TwelveTimeSeriesParamExtensions
         };
     }
 
-    private static Dictionary<DateTime, TimeSeriesValue> ParseJson(string json)
+    internal static Dictionary<DateTime, TimeSeriesValue> ParseJson(string json)
     {
         using var doc = JsonDocument.Parse(json);
+
+        if (IsNoDataResponse(doc.RootElement))
+            return new Dictionary<DateTime, TimeSeriesValue>();
 
         if (!doc.RootElement.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
             throw new InvalidOperationException("Unexpected JSON response: missing 'values' array.");
@@ -425,7 +543,7 @@ public static class TwelveTimeSeriesParamExtensions
         return result;
     }
 
-    private static decimal ParseDecimal(JsonElement item, string propertyName)
+    internal static decimal ParseDecimal(JsonElement item, string propertyName)
     {
         var s = item.GetProperty(propertyName).GetString();
         if (string.IsNullOrWhiteSpace(s))
@@ -434,7 +552,29 @@ public static class TwelveTimeSeriesParamExtensions
         return decimal.Parse(s, NumberStyles.Number, CultureInfo.InvariantCulture);
     }
 
-    private static Dictionary<DateTime, TimeSeriesValue> ParseCsv(string csv)
+    internal static bool IsNoDataResponse(JsonElement root)
+    {
+        if (!root.TryGetProperty("status", out var statusElement) ||
+            !string.Equals(statusElement.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!root.TryGetProperty("code", out var codeElement) || codeElement.ValueKind != JsonValueKind.Number)
+            return false;
+
+        if (codeElement.GetInt32() != 400)
+            return false;
+
+        if (!root.TryGetProperty("message", out var messageElement))
+            return false;
+
+        var message = messageElement.GetString();
+        return message?.Contains("No data is available on the specified dates", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+
+    internal static Dictionary<DateTime, TimeSeriesValue> ParseCsv(string csv)
     {
         var result = new Dictionary<DateTime, TimeSeriesValue>();
         var lines = csv.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -461,10 +601,10 @@ public static class TwelveTimeSeriesParamExtensions
         return result;
     }
 
-    private static string ToStorageKey(DateTime value) =>
+    internal static string ToStorageKey(DateTime value) =>
         value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
-    private static DateTime ParseStorageKey(string value) =>
+    internal static DateTime ParseStorageKey(string value) =>
         DateTime.ParseExact(value, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
 
     private static class QueryHelpers

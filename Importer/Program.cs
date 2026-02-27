@@ -66,7 +66,21 @@ var param = new TwelveTimeSeriesParam(
 var candles = await param.GetSeries();
 
 Console.WriteLine($"Candles fetched: {candles.Count}");
+var trimmedLeadingCandles = candles.TrimLeadingFilledCandles();
+Console.WriteLine($"Trimmed leading candles count: {trimmedLeadingCandles.Count}");
+Console.WriteLine($"Trimmed leading candles start: {trimmedLeadingCandles.Keys.FirstOrDefault()}");
+var trimmedTrailingCandles = candles.TrimTrailingFilledCandles();
+Console.WriteLine($"Trimmed trailing candles count: {trimmedTrailingCandles.Count}");
+Console.WriteLine($"Trimmed trailing candles end: {trimmedTrailingCandles.Keys.LastOrDefault()}");
+var trimmedLeadingAndTrailingCandles = candles.TrimLeadingAndTrailingFilledCandles();
+Console.WriteLine($"Trimmed leading and trailing candles count: {trimmedLeadingAndTrailingCandles.Count}");
+Console.WriteLine($"Trimmed leading and trailing candles start: {trimmedLeadingAndTrailingCandles.Keys.FirstOrDefault()}");
+Console.WriteLine($"Trimmed leading and trailing candles end: {trimmedLeadingAndTrailingCandles.Keys.LastOrDefault()}");
 
+var allCandles = (await param.GetAllSeries()).TrimLeadingAndTrailingFilledCandles();
+Console.WriteLine($"All candles fetched: {allCandles.Count}");
+Console.WriteLine($"All candles start: {allCandles.Keys.FirstOrDefault()}");
+Console.WriteLine($"All candles end: {allCandles.Keys.LastOrDefault()}");
 public sealed record TwelveDataSettings
 {
     public string? ApiKey { get; init; }
