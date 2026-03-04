@@ -28,6 +28,8 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="Cache/" />
+    <Folder Include="Cache/TimeSeries/" />
+    <Folder Include="Cache/Indicators/" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="Cache\**\*">

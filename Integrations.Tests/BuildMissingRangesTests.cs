@@ -16,7 +16,7 @@ public class BuildMissingRangesTests
     {
         var bucket = new SortedDictionary<string, TimeSeriesValue>(StringComparer.Ordinal);
         foreach (var dt in present)
-            bucket[TwelveTimeSeriesParamExtensions.ToStorageKey(dt)] = TimeSeriesFixtures.RealCandle(dt);
+            bucket[TwelveDataParamExtensions.ToStorageKey(dt)] = TimeSeriesFixtures.RealCandle(dt);
         return bucket;
     }
 
@@ -25,7 +25,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(T0, T1, T2);
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Empty(result);
     }
 
@@ -34,7 +34,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(); // empty cache
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T0, result[0].Start);
         Assert.Equal(T2, result[0].End);
@@ -45,7 +45,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(T0, T2); // T1 missing
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T1, result[0].Start);
         Assert.Equal(T1, result[0].End);
@@ -56,7 +56,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2, T3 };
         var bucket = MakeBucket(T0, T3); // T1 and T2 missing (contiguous 4h gap)
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T1, result[0].Start);
         Assert.Equal(T2, result[0].End);
@@ -74,7 +74,7 @@ public class BuildMissingRangesTests
         // Result: [(T0,T1), (T4,T4)]
         var timestamps = new List<DateTime> { T0, T1, T2, T3, T4 };
         var bucket = MakeBucket(T2, T3); // T0, T1, T4 are missing
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Equal(2, result.Count);
         Assert.Equal(T0, result[0].Start);
         Assert.Equal(T1, result[0].End);
@@ -87,7 +87,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(T1, T2);
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T0, result[0].Start);
     }
@@ -97,7 +97,7 @@ public class BuildMissingRangesTests
     {
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(T0, T1);
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T2, result[0].End);
     }
@@ -108,7 +108,7 @@ public class BuildMissingRangesTests
         // When only one timestamp is missing, step = TimeSpan.Zero, single range with Start==End
         var timestamps = new List<DateTime> { T0, T1, T2 };
         var bucket = MakeBucket(T0, T2);
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(timestamps, bucket);
+        var result = TwelveDataParamExtensions.BuildMissingRanges(timestamps, bucket);
         Assert.Single(result);
         Assert.Equal(T1, result[0].Start);
         Assert.Equal(T1, result[0].End);
@@ -117,7 +117,7 @@ public class BuildMissingRangesTests
     [Fact]
     public void BuildMissingRanges_EmptyExpected_ReturnsEmpty()
     {
-        var result = TwelveTimeSeriesParamExtensions.BuildMissingRanges(
+        var result = TwelveDataParamExtensions.BuildMissingRanges(
             new List<DateTime>(),
             MakeBucket());
         Assert.Empty(result);

@@ -14,8 +14,8 @@ public class GetSeriesTests
     [Fact]
     public async Task GetSeries_NullParam_ThrowsArgumentNullException()
     {
-        TwelveTimeSeriesParam? param = null;
-        await Assert.ThrowsAsync<ArgumentNullException>(() => param!.GetSeries());
+        TwelveDataParam? param = null;
+        await Assert.ThrowsAsync<ArgumentNullException>(() => TwelveDataSeries.GetSeries(param!));
     }
 
     [Fact]
@@ -28,7 +28,7 @@ public class GetSeriesTests
         // Second call (pagination) returns no data
         handler.EnqueueResponse(HttpStatusCode.OK, TimeSeriesFixtures.BuildNoDataJson());
 
-        var result = await param.GetSeries();
+        var result = await TwelveDataSeries.GetSeries(param);
 
         Assert.True(result.Count > 0);
     }
@@ -44,16 +44,16 @@ public class GetSeriesTests
         repoMock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<TimeSeriesCacheDocument>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
 
-        var param = new TwelveTimeSeriesParam(
+        var param = new TwelveDataParam(
             httpClient, repoMock.Object, "test-key", "AAPL",
-            Start, End, TwelveDataFormat.Csv, "4h");
+            Start, End, TwelveDataFormat.Csv, interval: "4h");
 
         handler.EnqueueResponse(HttpStatusCode.OK,
             TimeSeriesFixtures.BuildCsvPayload(("2024-01-01 00:00:00", "1900", "1950", "1880", "1920")),
             "text/csv");
         handler.EnqueueResponse(HttpStatusCode.OK, "datetime,open,high,low,close\n", "text/csv");
 
-        var result = await param.GetSeries();
+        var result = await TwelveDataSeries.GetSeries(param);
         Assert.True(result.Count > 0);
     }
 
@@ -68,7 +68,7 @@ public class GetSeriesTests
             {
                 ["4h"] = new SortedDictionary<string, TimeSeriesValue>(StringComparer.Ordinal)
                 {
-                    [TwelveTimeSeriesParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start)
+                    [TwelveDataParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start)
                 }
             }
         };
@@ -76,7 +76,7 @@ public class GetSeriesTests
         var (param, handler, _) = TimeSeriesFixtures.BuildParam(
             startDate: Start, endDate: End, cachedDoc: cachedDoc);
 
-        var result = await param.GetSeries();
+        var result = await TwelveDataSeries.GetSeries(param);
 
         Assert.Empty(handler.SentRequests);
         Assert.True(result.Count > 0);
@@ -91,7 +91,7 @@ public class GetSeriesTests
             TimeSeriesFixtures.BuildJsonPayload(("2024-01-01 00:00:00", "1900", "1950", "1880", "1920")));
         handler.EnqueueResponse(HttpStatusCode.OK, TimeSeriesFixtures.BuildNoDataJson());
 
-        await param.GetSeries();
+        await TwelveDataSeries.GetSeries(param);
 
         repoMock.Verify(r => r.SaveAsync(
             It.IsAny<string>(),
@@ -109,7 +109,7 @@ public class GetSeriesTests
             {
                 ["4h"] = new SortedDictionary<string, TimeSeriesValue>(StringComparer.Ordinal)
                 {
-                    [TwelveTimeSeriesParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start)
+                    [TwelveDataParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start)
                 }
             }
         };
@@ -117,7 +117,7 @@ public class GetSeriesTests
         var (param, _, repoMock) = TimeSeriesFixtures.BuildParam(
             startDate: Start, endDate: End, cachedDoc: cachedDoc);
 
-        await param.GetSeries();
+        await TwelveDataSeries.GetSeries(param);
 
         repoMock.Verify(r => r.SaveAsync(
             It.IsAny<string>(),
@@ -136,7 +136,7 @@ public class GetSeriesTests
         // Second call: no more data
         handler.EnqueueResponse(HttpStatusCode.OK, TimeSeriesFixtures.BuildNoDataJson());
 
-        var result = await param.GetSeries();
+        var result = await TwelveDataSeries.GetSeries(param);
 
         // T0 (00:00) should be filled since the only real data starts at 04:00
         var t0Key = new DateTime(2024, 1, 1, 0, 0, 0);
@@ -159,9 +159,9 @@ public class GetSeriesTests
             {
                 ["4h"] = new SortedDictionary<string, TimeSeriesValue>(StringComparer.Ordinal)
                 {
-                    [TwelveTimeSeriesParamExtensions.ToStorageKey(wideStart)] = TimeSeriesFixtures.RealCandle(wideStart),
-                    [TwelveTimeSeriesParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start),
-                    [TwelveTimeSeriesParamExtensions.ToStorageKey(wideEnd)] = TimeSeriesFixtures.RealCandle(wideEnd),
+                    [TwelveDataParamExtensions.ToStorageKey(wideStart)] = TimeSeriesFixtures.RealCandle(wideStart),
+                    [TwelveDataParamExtensions.ToStorageKey(Start)] = TimeSeriesFixtures.RealCandle(Start),
+                    [TwelveDataParamExtensions.ToStorageKey(wideEnd)] = TimeSeriesFixtures.RealCandle(wideEnd),
                 }
             }
         };
@@ -169,7 +169,7 @@ public class GetSeriesTests
         var (param, _, _) = TimeSeriesFixtures.BuildParam(
             startDate: Start, endDate: End, cachedDoc: cachedDoc);
 
-        var result = await param.GetSeries();
+        var result = await TwelveDataSeries.GetSeries(param);
 
         // Out-of-range timestamps should not be returned
         Assert.DoesNotContain(wideStart, result.Keys);

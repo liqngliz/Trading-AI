@@ -54,7 +54,7 @@ public static class TimeSeriesFixtures
         => """{"status":"error","code":400,"message":"No data is available on the specified dates."}""";
 
     public static (
-        TwelveTimeSeriesParam param,
+        TwelveDataParam param,
         FakeHttpMessageHandler handler,
         Mock<IRepository<TimeSeriesCacheDocument>> repoMock)
         BuildParam(
@@ -81,7 +81,7 @@ public static class TimeSeriesFixtures
         var start = startDate ?? new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         var end = endDate ?? new DateTime(2024, 1, 2, 0, 0, 0, DateTimeKind.Utc);
 
-        var param = new TwelveTimeSeriesParam(
+        var param = new TwelveDataParam(
             httpClient: httpClient,
             repository: repoMock.Object,
             apiKey: "test-key",

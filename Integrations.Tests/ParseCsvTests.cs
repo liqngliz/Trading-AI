@@ -9,7 +9,7 @@ public class ParseCsvTests
     public void ParseCsv_ValidSingleDataRow_ReturnsSingleEntry()
     {
         var csv = TimeSeriesFixtures.BuildCsvPayload(("2024-01-02 00:00:00", "1850.50", "1870.00", "1840.25", "1865.75"));
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Single(result);
     }
 
@@ -20,7 +20,7 @@ public class ParseCsvTests
             ("2024-01-01 00:00:00", "1900", "1950", "1880", "1920"),
             ("2024-01-01 04:00:00", "1920", "1960", "1910", "1945"),
             ("2024-01-01 08:00:00", "1945", "1970", "1935", "1960"));
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Equal(3, result.Count);
     }
 
@@ -28,7 +28,7 @@ public class ParseCsvTests
     public void ParseCsv_CandleValues_AllFieldsCorrect()
     {
         var csv = TimeSeriesFixtures.BuildCsvPayload(("2024-01-02 00:00:00", "1850.50", "1870.00", "1840.25", "1865.75"));
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         var candle = result.Values.Single();
         Assert.Equal(1850.50m, candle.Open);
         Assert.Equal(1870.00m, candle.High);
@@ -40,7 +40,7 @@ public class ParseCsvTests
     public void ParseCsv_ParsedCandle_IsFilled_IsFalse()
     {
         var csv = TimeSeriesFixtures.BuildCsvPayload(("2024-01-02 00:00:00", "1900", "1950", "1880", "1920"));
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.False(result.Values.Single().IsFilled);
     }
 
@@ -48,7 +48,7 @@ public class ParseCsvTests
     public void ParseCsv_ParsedCandle_Datetime_ParsedCorrectly()
     {
         var csv = TimeSeriesFixtures.BuildCsvPayload(("2024-01-02 08:00:00", "1900", "1950", "1880", "1920"));
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Equal(new DateTime(2024, 1, 2, 8, 0, 0), result.Keys.Single());
     }
 
@@ -56,14 +56,14 @@ public class ParseCsvTests
     public void ParseCsv_HeaderOnlyNoDataRows_ReturnsEmptyDictionary()
     {
         var csv = "datetime,open,high,low,close\n";
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Empty(result);
     }
 
     [Fact]
     public void ParseCsv_EmptyString_ReturnsEmptyDictionary()
     {
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv("");
+        var result = TwelveDataSeries.ParseCsv("");
         Assert.Empty(result);
     }
 
@@ -71,7 +71,7 @@ public class ParseCsvTests
     public void ParseCsv_WindowsLineEndings_ParsedCorrectly()
     {
         var csv = "datetime,open,high,low,close\r\n2024-01-02 00:00:00,1900,1950,1880,1920\r\n";
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Single(result);
     }
 
@@ -79,7 +79,7 @@ public class ParseCsvTests
     public void ParseCsv_UnixLineEndings_ParsedCorrectly()
     {
         var csv = "datetime,open,high,low,close\n2024-01-02 00:00:00,1900,1950,1880,1920\n";
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Single(result);
     }
 
@@ -88,7 +88,7 @@ public class ParseCsvTests
     {
         // Row with only 3 fields — should be silently skipped
         var csv = "datetime,open,high,low,close\n2024-01-02 00:00:00,1900,1950\n2024-01-03 00:00:00,1900,1950,1880,1920\n";
-        var result = TwelveTimeSeriesParamExtensions.ParseCsv(csv);
+        var result = TwelveDataSeries.ParseCsv(csv);
         Assert.Single(result);
     }
 }

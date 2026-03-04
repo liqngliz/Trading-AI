@@ -36,14 +36,14 @@ builder.Services.AddSingleton<IConfiguration>(configuration);
 // Register named HttpClient from configuration
 builder.Services.AddHttpClients(new Uri(twelveDataSettings.Uri));
 
-// Register JSON repository in DI
+// Register JSON repositories in DI — separate subdirectories to avoid filename collisions
 builder.Services.AddSingleton<IRepository<TimeSeriesCacheDocument>>(_ =>
-{
-    var cacheDirectory = Path.Combine(AppContext.BaseDirectory, "Cache");
-    Directory.CreateDirectory(cacheDirectory);
+    new JsonFileRepository<TimeSeriesCacheDocument>(
+        Path.Combine(AppContext.BaseDirectory, "Cache", "TimeSeries")));
 
-    return new JsonFileRepository<TimeSeriesCacheDocument>(cacheDirectory);
-});
+builder.Services.AddSingleton<IRepository<IndicatorCacheDocument>>(_ =>
+    new JsonFileRepository<IndicatorCacheDocument>(
+        Path.Combine(AppContext.BaseDirectory, "Cache", "Indicators")));
 
 var host = builder.Build();
 
@@ -51,19 +51,27 @@ var httpClientFactory = host.Services.GetRequiredService<IHttpClientFactory>();
 var httpClient = httpClientFactory.CreateClient("TwelveData");
 
 var repository = host.Services.GetRequiredService<IRepository<TimeSeriesCacheDocument>>();
+var indicatorRepository = host.Services.GetRequiredService<IRepository<IndicatorCacheDocument>>();
 
-var param = new TwelveTimeSeriesParam(
+const string symbol = "XAU/USD";
+const string interval = "4h";
+var startDate = new DateTime(1992, 10, 1, 0, 0, 0);
+var endDate = new DateTime(2025, 11, 1, 0, 0, 0);
+
+var param = new TwelveDataParam(
     httpClient: httpClient,
     repository: repository,
     apiKey: twelveDataSettings.ApiKey,
-    symbol: "XAU/USD",
-    startDate: new DateTime(1992, 10, 1, 0, 0, 0),
-    endDate: new DateTime(2025, 11, 1, 0, 0, 0),
+    symbol: symbol,
+    startDate: startDate,
+    endDate: endDate,
     format: TwelveDataFormat.Json,
-    interval: "4h",
+    interval: interval,
     outputSize: 5000);
 
-var candles = await param.GetSeries();
+// ── Time series ───────────────────────────────────────────────────────────────
+
+var candles = await TwelveDataSeries.GetSeries(param);
 
 Console.WriteLine($"Candles fetched: {candles.Count}");
 var trimmedLeadingCandles = candles.TrimLeadingFilledCandles();
@@ -77,10 +85,34 @@ Console.WriteLine($"Trimmed leading and trailing candles count: {trimmedLeadingA
 Console.WriteLine($"Trimmed leading and trailing candles start: {trimmedLeadingAndTrailingCandles.Keys.FirstOrDefault()}");
 Console.WriteLine($"Trimmed leading and trailing candles end: {trimmedLeadingAndTrailingCandles.Keys.LastOrDefault()}");
 
-var allCandles = (await param.GetAllSeries()).TrimLeadingAndTrailingFilledCandles();
-Console.WriteLine($"All candles fetched: {allCandles.Count}");
-Console.WriteLine($"All candles start: {allCandles.Keys.FirstOrDefault()}");
-Console.WriteLine($"All candles end: {allCandles.Keys.LastOrDefault()}");
+
+// ── Volume indicators ─────────────────────────────────────────────────────────
+
+TwelveDataParam IndicatorParam(TwelveDataEndpoint endpoint) => new(
+    httpClient: httpClient,
+    repository: repository,
+    apiKey: twelveDataSettings.ApiKey,
+    symbol: symbol,
+    startDate: startDate,
+    endDate: endDate,
+    format: TwelveDataFormat.Json,
+    endpoint: endpoint,
+    interval: interval,
+    outputSize: 5000,
+    indicatorRepository: indicatorRepository);
+/*
+var obv = (await TwelveDataIndicator.GetIndicator(IndicatorParam(TwelveDataEndpoint.Obv))).TrimLeadingAndTrailingFilledIndicators();
+Console.WriteLine($"OBV count: {obv.Count}, start: {obv.Keys.FirstOrDefault()}, end: {obv.Keys.LastOrDefault()}");
+
+var ad = (await TwelveDataIndicator.GetIndicator(IndicatorParam(TwelveDataEndpoint.Ad))).TrimLeadingAndTrailingFilledIndicators();
+Console.WriteLine($"AD  count: {ad.Count}, start: {ad.Keys.FirstOrDefault()}, end: {ad.Keys.LastOrDefault()}");
+
+var adosc = (await TwelveDataIndicator.GetIndicator(IndicatorParam(TwelveDataEndpoint.Adosc))).TrimLeadingAndTrailingFilledIndicators();
+Console.WriteLine($"ADOSC count: {adosc.Count}, start: {adosc.Keys.FirstOrDefault()}, end: {adosc.Keys.LastOrDefault()}");
+*/
+
+var rvol = (await TwelveDataIndicator.GetIndicator(IndicatorParam(TwelveDataEndpoint.Rvol))).TrimLeadingAndTrailingFilledIndicators();
+Console.WriteLine($"RVOL  count: {rvol.Count}, start: {rvol.Keys.FirstOrDefault()}, end: {rvol.Keys.LastOrDefault()}");
 public sealed record TwelveDataSettings
 {
     public string? ApiKey { get; init; }
