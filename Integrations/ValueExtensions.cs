@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Integrations.TwelveData;
 
 public static class ValueExtensions
@@ -44,21 +46,31 @@ public static class ValueExtensions
     {
         ArgumentNullException.ThrowIfNull(values);
 
+        var sw = Stopwatch.StartNew();
+
         var ordered = values.OrderBy(x => x.Key).ToList();
 
         if (ordered.Count == 0)
             return new Dictionary<DateTime, TValue>();
 
-        var firstKeptIndex = ordered.FindIndex(x => !shouldTrim(x.Value));
-        var lastKeptIndex = ordered.FindLastIndex(x => !shouldTrim(x.Value));
+        int firstKeptIndex = 0;
+        while (firstKeptIndex < ordered.Count && shouldTrim(ordered[firstKeptIndex].Value))
+            firstKeptIndex++;
 
-        if (firstKeptIndex < 0 || lastKeptIndex < 0)
+        int lastKeptIndex = ordered.Count - 1;
+        while (lastKeptIndex > firstKeptIndex && shouldTrim(ordered[lastKeptIndex].Value))
+            lastKeptIndex--;
+
+        if (firstKeptIndex >= ordered.Count || shouldTrim(ordered[firstKeptIndex].Value))
             return new Dictionary<DateTime, TValue>();
 
-        return ordered
+        var result = ordered
             .Skip(firstKeptIndex)
             .Take(lastKeptIndex - firstKeptIndex + 1)
             .ToDictionary(x => x.Key, x => x.Value);
+
+        Console.WriteLine($"[TrimLeadingAndTrailing] {values.Count} → {result.Count} entries in {sw.ElapsedMilliseconds}ms");
+        return result;
     }
 
     // ── TimeSeriesValue convenience ───────────────────────────────────────────

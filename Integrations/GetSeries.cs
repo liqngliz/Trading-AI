@@ -19,9 +19,8 @@ public static class TwelveDataSeries
         var toStorageKey            = functions.ToStorageKey;
         var parseStorageKey         = functions.ParseStorageKey;
 
-        var cacheKey = param.Symbol;
         var cache = await param.Repository
-            .GetAsync(cacheKey, param.CancellationToken)
+            .GetAsync(param.Symbol, param.Interval, param.CancellationToken)
             .ConfigureAwait(false)
             ?? new TimeSeriesCacheDocument { Symbol = param.Symbol };
 
@@ -63,7 +62,7 @@ public static class TwelveDataSeries
         if (missingRanges.Count > 0 || filledMissingCount > 0)
         {
             await param.Repository
-                .SaveAsync(cacheKey, cache, param.CancellationToken)
+                .SaveAsync(param.Symbol, param.Interval, cache, param.CancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -147,19 +146,32 @@ public static class TwelveDataSeries
         var endpointPath = TwelveDataParamExtensions.GetEndpointPath(param.Endpoint);
         var requestUri = new Uri(TwelveDataParamExtensions.QueryHelpers.AddQueryString(endpointPath, query), UriKind.Relative);
 
-        using var response = await param.HttpClient
-            .GetAsync(requestUri, param.CancellationToken)
-            .ConfigureAwait(false);
+        while (true)
+        {
+            await TwelveDataRateLimiter.WaitForSlotAsync(param.CancellationToken);
 
-        response.EnsureSuccessStatusCode();
+            using var response = await param.HttpClient
+                .GetAsync(requestUri, param.CancellationToken)
+                .ConfigureAwait(false);
 
-        var content = await response.Content
-            .ReadAsStringAsync(param.CancellationToken)
-            .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
 
-        return param.Format == TwelveDataFormat.Json
-            ? ParseJson(content)
-            : ParseCsv(content);
+            var content = await response.Content
+                .ReadAsStringAsync(param.CancellationToken)
+                .ConfigureAwait(false);
+
+            try
+            {
+                return param.Format == TwelveDataFormat.Json
+                    ? ParseJson(content)
+                    : ParseCsv(content);
+            }
+            catch (TwelveDataRateLimitException ex)
+            {
+                Console.WriteLine($"  [429] {ex.Message} Waiting {TwelveDataRateLimiter.RetryDelay.TotalSeconds:F0}s before retry...");
+                await Task.Delay(TwelveDataRateLimiter.RetryDelay, param.CancellationToken);
+            }
+        }
     }
 
     internal static int FillMissingRanges(
@@ -223,11 +235,28 @@ public static class TwelveDataSeries
     internal static Dictionary<DateTime, TimeSeriesValue> ParseJson(string json)
     {
         using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
 
-        if (TwelveDataParamExtensions.IsNoDataResponse(doc.RootElement))
-            return new Dictionary<DateTime, TimeSeriesValue>();
+        if (root.TryGetProperty("status", out var statusEl) &&
+            string.Equals(statusEl.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+        {
+            var code = root.TryGetProperty("code", out var codeEl) && codeEl.ValueKind == JsonValueKind.Number
+                ? codeEl.GetInt32() : 0;
+            var message = root.TryGetProperty("message", out var msgEl) ? msgEl.GetString() : null;
 
-        if (!doc.RootElement.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
+            if (code == 400)
+                return new Dictionary<DateTime, TimeSeriesValue>();
+
+            if (code == 429)
+                throw new TwelveDataRateLimitException(message ?? "Rate limit exceeded.");
+
+            if (code == 404)
+                throw new TwelveDataSymbolUnavailableException(message ?? "Symbol not available on current plan.");
+
+            throw new InvalidOperationException($"TwelveData API error {code}: {message}");
+        }
+
+        if (!root.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
             throw new InvalidOperationException("Unexpected JSON response: missing 'values' array.");
 
         var result = new Dictionary<DateTime, TimeSeriesValue>();

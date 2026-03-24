@@ -2,6 +2,6 @@ namespace Integrations.TwelveData;
 
 public interface IRepository<T>
 {
-    Task<T?> GetAsync(string key, CancellationToken cancellationToken = default);
-    Task SaveAsync(string key, T value, CancellationToken cancellationToken = default);
+    Task<T?> GetAsync(string symbol, string interval, CancellationToken cancellationToken = default);
+    Task SaveAsync(string symbol, string interval, T value, CancellationToken cancellationToken = default);
 }

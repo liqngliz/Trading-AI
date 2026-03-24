@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\integrations\integrations.csproj" />
+    <ProjectReference Include="..\Indicators\Indicators.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -10,6 +11,7 @@
     <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.3" />
     <PackageReference Include="Microsoft.Extensions.Configuration.json" Version="10.0.3" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Extensions.Http.Polly" Version="10.0.3" />
   </ItemGroup>
 
   <PropertyGroup>

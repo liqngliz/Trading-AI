@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Integrations.TwelveData;
 
@@ -43,6 +44,9 @@ public sealed record TimeSeriesCacheDocument
 public sealed record IndicatorCacheDocument
 {
     public string Symbol { get; init; } = string.Empty;
+
+    /// <summary>Bucket keys (e.g. "rvol/4h") for which the API returned no usable data.</summary>
+    public HashSet<string> UnavailableBuckets { get; init; } = new();
 
     // Outer key: "endpoint/interval" (e.g. "obv/4h"), inner key: storage key, value: IndicatorValue
     public Dictionary<string, SortedDictionary<string, IndicatorValue>> Data { get; init; } = new();
@@ -192,14 +196,14 @@ public static class TwelveDataParamExtensions
             "1h" => TimeSpan.FromHours(1),
             "2h" => TimeSpan.FromHours(2),
             "4h" => TimeSpan.FromHours(4),
-            "5h" => TimeSpan.FromHours(5),
+            "8h" => TimeSpan.FromHours(8),
             "1day" => TimeSpan.FromDays(1),
             "1week" => TimeSpan.FromDays(7),
             "1month" => throw new InvalidOperationException(
                 "Interval '1month' is not supported by this implementation because month length is variable."),
             _ => throw new InvalidOperationException(
                 $"Unsupported interval '{interval}'. Supported values: " +
-                "1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 5h, 1day, 1week.")
+                "1min, 5min, 15min, 30min, 45min, 1h, 2h, 4h, 8h, 1day, 1week.")
         };
     }
 
@@ -272,3 +276,8 @@ public static class TwelveDataParamExtensions
         }
     }
 }
+
+[JsonSourceGenerationOptions(WriteIndented = true)]
+[JsonSerializable(typeof(TimeSeriesCacheDocument))]
+[JsonSerializable(typeof(IndicatorCacheDocument))]
+public partial class CacheJsonContext : JsonSerializerContext { }

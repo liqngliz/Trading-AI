@@ -39,13 +39,18 @@ public static class TwelveDataIndicator
                 kvp => new IndicatorValue(kvp.Key, kvp.Value, IsFilled: false));
         }
 
-        var cacheKey = param.Symbol;
         var bucketKey = $"{getEndpointPath(param.Endpoint)}/{param.Interval}";
 
         var cache = await param.IndicatorRepository
-            .GetAsync(cacheKey, param.CancellationToken)
+            .GetAsync(param.Symbol, bucketKey, param.CancellationToken)
             .ConfigureAwait(false)
             ?? new IndicatorCacheDocument { Symbol = param.Symbol };
+
+        if (cache.UnavailableBuckets.Contains(bucketKey))
+        {
+            Console.WriteLine($"  [GetIndicator] {param.Symbol}/{bucketKey}: previously marked unavailable, skipping.");
+            return new Dictionary<DateTime, IndicatorValue>();
+        }
 
         if (!cache.Data.TryGetValue(bucketKey, out var bucket))
         {
@@ -77,12 +82,23 @@ public static class TwelveDataIndicator
                 bucket[toStorageKey(kvp.Key)] = new IndicatorValue(kvp.Key, kvp.Value, IsFilled: false);
         }
 
+        // If we fetched but got no real data at all, mark the bucket as permanently unavailable.
+        if (missingRanges.Count > 0 && !bucket.Values.Any(v => !v.IsFilled))
+        {
+            cache.UnavailableBuckets.Add(bucketKey);
+            Console.WriteLine($"  [GetIndicator] {param.Symbol}/{bucketKey}: API returned no usable data, marked as unavailable.");
+            await param.IndicatorRepository
+                .SaveAsync(param.Symbol, bucketKey, cache, param.CancellationToken)
+                .ConfigureAwait(false);
+            return new Dictionary<DateTime, IndicatorValue>();
+        }
+
         var filledMissingCount = FillMissingIndicatorRanges(expectedTimestamps, bucket);
 
         if (missingRanges.Count > 0 || filledMissingCount > 0)
         {
             await param.IndicatorRepository
-                .SaveAsync(cacheKey, cache, param.CancellationToken)
+                .SaveAsync(param.Symbol, bucketKey, cache, param.CancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -158,17 +174,35 @@ public static class TwelveDataIndicator
         var endpointPath = TwelveDataParamExtensions.GetEndpointPath(param.Endpoint);
         var requestUri = new Uri(TwelveDataParamExtensions.QueryHelpers.AddQueryString(endpointPath, query), UriKind.Relative);
 
-        using var response = await param.HttpClient
-            .GetAsync(requestUri, param.CancellationToken)
-            .ConfigureAwait(false);
+        while (true)
+        {
+            await TwelveDataRateLimiter.WaitForSlotAsync(param.CancellationToken);
 
-        response.EnsureSuccessStatusCode();
+            using var response = await param.HttpClient
+                .GetAsync(requestUri, param.CancellationToken)
+                .ConfigureAwait(false);
 
-        var content = await response.Content
-            .ReadAsStringAsync(param.CancellationToken)
-            .ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
 
-        return ParseIndicatorJson(content, GetIndicatorFieldName(param.Endpoint));
+            var content = await response.Content
+                .ReadAsStringAsync(param.CancellationToken)
+                .ConfigureAwait(false);
+
+            try
+            {
+                return ParseIndicatorJson(content, GetIndicatorFieldName(param.Endpoint));
+            }
+            catch (TwelveDataRateLimitException ex)
+            {
+                Console.WriteLine($"  [429] {ex.Message} Waiting {TwelveDataRateLimiter.RetryDelay.TotalSeconds:F0}s before retry...");
+                await Task.Delay(TwelveDataRateLimiter.RetryDelay, param.CancellationToken);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  [GetIndicatorFromApi] Error parsing response for symbol={param.Symbol}, endpoint={param.Endpoint}: {ex.Message}");
+                throw;
+            }
+        }
     }
 
     internal static int FillMissingIndicatorRanges(
@@ -208,31 +242,52 @@ public static class TwelveDataIndicator
     {
         using var doc = JsonDocument.Parse(json);
 
-        if (TwelveDataParamExtensions.IsNoDataResponse(doc.RootElement))
-            return new Dictionary<DateTime, decimal>();
-
-        // Any other API error (e.g. indicator not calculable for this range) — treat as no data.
         if (doc.RootElement.TryGetProperty("status", out var statusEl) &&
             string.Equals(statusEl.GetString(), "error", StringComparison.OrdinalIgnoreCase))
+        {
+            var code = doc.RootElement.TryGetProperty("code", out var codeEl) && codeEl.ValueKind == JsonValueKind.Number
+                ? codeEl.GetInt32() : 0;
+            var message = doc.RootElement.TryGetProperty("message", out var msgEl) ? msgEl.GetString() : null;
+
+            if (code == 429)
+                throw new TwelveDataRateLimitException(message ?? "Rate limit exceeded.");
+
+            // 400 (no data, indicator not calculable) and any other error — treat as no data.
             return new Dictionary<DateTime, decimal>();
+        }
 
         if (!doc.RootElement.TryGetProperty("values", out var values) || values.ValueKind != JsonValueKind.Array)
             throw new InvalidOperationException("Unexpected JSON response: missing 'values' array.");
 
+        var items = values.EnumerateArray().ToList();
         var result = new Dictionary<DateTime, decimal>();
 
-        foreach (var item in values.EnumerateArray())
+        foreach (var item in items)
         {
             var dtRaw = item.GetProperty("datetime").GetString()
                 ?? throw new InvalidOperationException("Missing datetime.");
 
             var valueStr = item.GetProperty(fieldName).GetString();
             if (string.IsNullOrWhiteSpace(valueStr) ||
-                valueStr.Equals("NaN", StringComparison.OrdinalIgnoreCase))
+                valueStr.Equals("NaN", StringComparison.OrdinalIgnoreCase) ||
+                valueStr.Equals("+Inf", StringComparison.OrdinalIgnoreCase) ||
+                valueStr.Equals("-Inf", StringComparison.OrdinalIgnoreCase) ||
+                valueStr.Equals("Inf", StringComparison.OrdinalIgnoreCase))
                 continue;
-
-            var dt = DateTime.Parse(dtRaw, CultureInfo.InvariantCulture);
-            result[dt] = decimal.Parse(valueStr, NumberStyles.Number, CultureInfo.InvariantCulture);
+            
+            try
+            {
+                var dt = DateTime.Parse(dtRaw, CultureInfo.InvariantCulture);
+                result[dt] = decimal.Parse(valueStr, NumberStyles.Number, CultureInfo.InvariantCulture);
+            }
+            catch (FormatException ex)
+            {
+                Console.WriteLine($"  [ParseIndicatorJson] Failed to parse entry: datetime={dtRaw}, value={valueStr} — {ex.Message}");
+                Console.WriteLine($"  [ParseIndicatorJson] Full values array ({items.Count} items):");
+                foreach (var i in items)
+                    Console.WriteLine($"    {i}");
+                throw;
+            }
         }
 
         return result;
