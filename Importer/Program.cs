@@ -312,7 +312,7 @@ var cfg = new DatasetConfig
     OutputDirectory    = Path.Combine(AppContext.BaseDirectory, "Dataset")
 };
 
-var (rows, columns) = Transformer.BuildFeatureMatrix(cfg, allCandles, allIndicators);
+var (rows, columns, columnStats) = Transformer.BuildFeatureMatrix(cfg, allCandles, allIndicators);
 
 if (rows.Count > 0)
 {

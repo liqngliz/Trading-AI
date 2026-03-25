@@ -39,9 +39,9 @@ public class GetIndicatorTests
     private static Mock<IRepository<IndicatorCacheDocument>> EmptyIndicatorRepo()
     {
         var mock = new Mock<IRepository<IndicatorCacheDocument>>();
-        mock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        mock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((IndicatorCacheDocument?)null);
-        mock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<IndicatorCacheDocument>(), It.IsAny<CancellationToken>()))
+        mock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IndicatorCacheDocument>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         return mock;
     }
@@ -61,9 +61,9 @@ public class GetIndicatorTests
         };
 
         var mock = new Mock<IRepository<IndicatorCacheDocument>>();
-        mock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        mock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(doc);
-        mock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<IndicatorCacheDocument>(), It.IsAny<CancellationToken>()))
+        mock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IndicatorCacheDocument>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
         return mock;
     }
@@ -243,6 +243,7 @@ public class GetIndicatorTests
         Assert.NotEmpty(handler.SentRequests);
         repoMock.Verify(r => r.SaveAsync(
             It.IsAny<string>(),
+            It.IsAny<string>(),
             It.IsAny<IndicatorCacheDocument>(),
             It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -272,6 +273,7 @@ public class GetIndicatorTests
         await TwelveDataIndicator.GetIndicator(param);
 
         repoMock.Verify(r => r.SaveAsync(
+            It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<IndicatorCacheDocument>(),
             It.IsAny<CancellationToken>()), Times.Never);

@@ -39,9 +39,9 @@ public class GetSeriesTests
         var handler = new FakeHttpMessageHandler();
         var httpClient = new HttpClient(handler) { BaseAddress = new Uri("https://api.twelvedata.com/") };
         var repoMock = new Mock<IRepository<TimeSeriesCacheDocument>>();
-        repoMock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+        repoMock.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync((TimeSeriesCacheDocument?)null);
-        repoMock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<TimeSeriesCacheDocument>(), It.IsAny<CancellationToken>()))
+        repoMock.Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<TimeSeriesCacheDocument>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.CompletedTask);
 
         var param = new TwelveDataParam(
@@ -95,6 +95,7 @@ public class GetSeriesTests
 
         repoMock.Verify(r => r.SaveAsync(
             It.IsAny<string>(),
+            It.IsAny<string>(),
             It.IsAny<TimeSeriesCacheDocument>(),
             It.IsAny<CancellationToken>()), Times.AtLeastOnce);
     }
@@ -120,6 +121,7 @@ public class GetSeriesTests
         await TwelveDataSeries.GetSeries(param);
 
         repoMock.Verify(r => r.SaveAsync(
+            It.IsAny<string>(),
             It.IsAny<string>(),
             It.IsAny<TimeSeriesCacheDocument>(),
             It.IsAny<CancellationToken>()), Times.Never);

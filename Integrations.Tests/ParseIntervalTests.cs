@@ -12,7 +12,7 @@ public class ParseIntervalTests
     [Fact] public void ParseInterval_1h_Returns1Hour()       => Assert.Equal(TimeSpan.FromHours(1),    TwelveDataParamExtensions.ParseInterval("1h"));
     [Fact] public void ParseInterval_2h_Returns2Hours()      => Assert.Equal(TimeSpan.FromHours(2),    TwelveDataParamExtensions.ParseInterval("2h"));
     [Fact] public void ParseInterval_4h_Returns4Hours()      => Assert.Equal(TimeSpan.FromHours(4),    TwelveDataParamExtensions.ParseInterval("4h"));
-    [Fact] public void ParseInterval_5h_Returns5Hours()      => Assert.Equal(TimeSpan.FromHours(5),    TwelveDataParamExtensions.ParseInterval("5h"));
+    [Fact] public void ParseInterval_8h_Returns8Hours()      => Assert.Equal(TimeSpan.FromHours(8),    TwelveDataParamExtensions.ParseInterval("8h"));
     [Fact] public void ParseInterval_1day_Returns1Day()      => Assert.Equal(TimeSpan.FromDays(1),     TwelveDataParamExtensions.ParseInterval("1day"));
     [Fact] public void ParseInterval_1week_Returns7Days()    => Assert.Equal(TimeSpan.FromDays(7),     TwelveDataParamExtensions.ParseInterval("1week"));
 

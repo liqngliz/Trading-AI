@@ -35,23 +35,23 @@ public sealed class DatasetConfig
     /// <summary>Aggregation statistics applied over short-TF windows.</summary>
     public string[] AggStats { get; init; } = ["mean", "min", "max", "last", "std"];
 
-    // Indicator periods
-    public int SmaPeriod       { get; init; } = 20;
-    public int EmaPeriod       { get; init; } = 20;
-    public int RsiPeriod       { get; init; } = 14;
-    public int RocPeriod       { get; init; } = 1;
-    public int StdDevPeriod    { get; init; } = 20;
-    public int AtrPeriod       { get; init; } = 14;
-    public int BbPeriod        { get; init; } = 20;
-    public int CciPeriod       { get; init; } = 20;
-    public int WilliamsRPeriod { get; init; } = 14;
-    public int StochKPeriod    { get; init; } = 14;
-    public int StochDPeriod    { get; init; } = 3;
-    public int MacdFast        { get; init; } = 12;
-    public int MacdSlow        { get; init; } = 26;
-    public int MacdSignal      { get; init; } = 9;
-    public int DistN           { get; init; } = 20;
-    public int AdZScorePeriod  { get; init; } = 252;
+    // Indicator periods — 5 per indicator: shortest, short, medium, long, longest
+    public int[] SmaPeriods       { get; init; } = [14, 25, 50, 100, 200];
+    public int[] EmaPeriods       { get; init; } = [14, 25, 50, 100, 200];
+    public int[] RsiPeriods       { get; init; } = [7, 14, 21, 28, 50];
+    public int[] RocPeriods       { get; init; } = [1, 5, 14, 21, 50];
+    public int[] StdDevPeriods    { get; init; } = [10, 20, 50, 100, 200];
+    public int[] AtrPeriods       { get; init; } = [7, 14, 21, 50, 100];
+    public int[] BbPeriods        { get; init; } = [10, 20, 50, 100, 200];
+    public int[] CciPeriods       { get; init; } = [10, 20, 50, 100, 200];
+    public int[] WilliamsRPeriods { get; init; } = [7, 14, 21, 28, 50];
+    public int[] StochKPeriods    { get; init; } = [5, 14, 21, 28, 50];
+    public int StochDPeriod       { get; init; } = 3;
+    public int MacdFast           { get; init; } = 12;
+    public int MacdSlow           { get; init; } = 26;
+    public int MacdSignal         { get; init; } = 9;
+    public int DistN              { get; init; } = 20;
+    public int AdZScorePeriod     { get; init; } = 252;
 
     public int WalkForwardFolds { get; init; } = 5;
     public int PurgeBarsGap     { get; init; } = 2;   // in 4h bars
@@ -73,26 +73,15 @@ public sealed class DatasetConfig
 public sealed class DatasetRow
 {
     public DateTime Timestamp { get; init; }
-    /// <summary>Feature + target values, parallel to the Columns array returned by BuildFeatureMatrix.</summary>
-    public double?[] Values { get; init; } = [];
+    /// <summary>Feature + target values keyed by column name.</summary>
+    public Dictionary<string, double?> Values { get; init; } = [];
 }
 
 // ── Transformer ───────────────────────────────────────────────────────────────
 
 public static class Transformer
 {
-    // Indicator names, in declaration order (index matches GetIndicatorArray switch).
     private static readonly JsonSerializerOptions JsonIndented = new() { WriteIndented = true };
-
-    private static readonly string[] IndicatorNames =
-    [
-        "LogReturn", "SMA", "EMA", "RSI", "ROC", "StdDev", "ATR",
-        "BbUpper", "BbLower", "BbWidth",
-        "CCI", "WilliamsR", "StochK", "StochD",
-        "MacdLine", "MacdSignal", "MacdHist",
-        "CandleRange", "BodySize", "UpperWick", "LowerWick",
-        "DistHigh", "DistLow", "AccumDist", "AccumDistOsc"
-    ];
 
     private static readonly string[] CrossAssetCols =
     [
@@ -127,7 +116,7 @@ public static class Transformer
     /// <param name="allCandles">symbol → interval → time-sorted candles.</param>
     /// <param name="allIndicators">symbol → "endpoint/interval" → time-sorted indicator values.</param>
     /// <returns>Assembled rows and the column header array.</returns>
-    public static (List<DatasetRow> Rows, string[] Columns) BuildFeatureMatrix(
+    public static (List<DatasetRow> Rows, string[] Columns, Dictionary<string, (int NullCount, int EmptyCount, int ZeroCount)> ColumnStats) BuildFeatureMatrix(
         DatasetConfig cfg,
         IReadOnlyDictionary<string, Dictionary<string, List<TimeSeriesValue>>> allCandles,
         IReadOnlyDictionary<string, Dictionary<string, List<IndicatorValue>>> allIndicators)
@@ -175,7 +164,8 @@ public static class Transformer
         foreach (var c in TimeCols)        AddCol(c);
         foreach (var c in CrossAssetCols)  AddCol(c);
 
-        int nInds  = IndicatorNames.Length;
+        var indicatorNames = BuildIndicatorNames(cfg);
+        int nInds  = indicatorNames.Length;
         int nStats = cfg.AggStats.Length;
 
         for (int ai = 0; ai < DatasetConfig.AllAssets.Length; ai++)
@@ -185,7 +175,7 @@ public static class Transformer
             {
                 if (shortSd[ai][ti] == null) continue;
                 var tf = DatasetConfig.ShortTimeframes[ti];
-                foreach (var ind in IndicatorNames)
+                foreach (var ind in indicatorNames)
                     foreach (var stat in cfg.AggStats)
                         AddCol($"{safe}_{tf}_{ind}_{stat}");
             }
@@ -194,7 +184,7 @@ public static class Transformer
             {
                 if (longSd[ai][ti] == null) continue;
                 var tf = DatasetConfig.LongTimeframes[ti];
-                foreach (var ind in IndicatorNames)
+                foreach (var ind in indicatorNames)
                     AddCol($"{safe}_{tf}_{ind}");
             }
         }
@@ -222,7 +212,7 @@ public static class Transformer
                     shortIdx[ai][ti][ii] = new int[nStats];
                     for (int si = 0; si < nStats; si++)
                     {
-                        var key = $"{safe}_{tf}_{IndicatorNames[ii]}_{cfg.AggStats[si]}";
+                        var key = $"{safe}_{tf}_{indicatorNames[ii]}_{cfg.AggStats[si]}";
                         shortIdx[ai][ti][ii][si] = colIndex.TryGetValue(key, out var ci) ? ci : -1;
                     }
                 }
@@ -241,7 +231,7 @@ public static class Transformer
                 var tf = DatasetConfig.LongTimeframes[ti];
                 for (int ii = 0; ii < nInds; ii++)
                 {
-                    var key = $"{safe}_{tf}_{IndicatorNames[ii]}";
+                    var key = $"{safe}_{tf}_{indicatorNames[ii]}";
                     longIdx[ai][ti][ii] = colIndex.TryGetValue(key, out var ci) ? ci : -1;
                 }
             }
@@ -266,7 +256,7 @@ public static class Transformer
         if (baseSd == null || baseSd.Times.Length == 0)
         {
             Console.WriteLine($"[BuildFeatureMatrix] No 4h data for {cfg.TargetSymbol}. Aborting.");
-            return ([], columns.ToArray());
+            return ([], columns.ToArray(), []);
         }
 
         // Pre-look up cross-asset SeriesData indices
@@ -287,10 +277,19 @@ public static class Transformer
         int ciSession = colIndex["Session"];
         var xaCols    = CrossAssetCols.Select(c => colIndex.TryGetValue(c, out var i) ? i : -1).ToArray();
 
+        // Indicator indices used by cross-asset features
+        int indLogReturn = 0; // always first
+        int indRsi = Array.IndexOf(indicatorNames, cfg.RsiPeriods.Contains(14) ? "RSI_14" : $"RSI_{cfg.RsiPeriods[0]}");
+        int indAtr = Array.IndexOf(indicatorNames, cfg.AtrPeriods.Contains(14) ? "ATR_14" : $"ATR_{cfg.AtrPeriods[0]}");
+
         // ── Main loop ─────────────────────────────────────────────────────────
 
-        var rows    = new List<DatasetRow>(baseSd.Times.Length);
-        int skipped = 0;
+        var cols        = columns.ToArray();
+        var rows        = new List<DatasetRow>(baseSd.Times.Length);
+        int skipped     = 0;
+        var nullCounts  = new int[nCols];
+        var zeroCounts  = new int[nCols]; // strictly 0.0 (non-null)
+        var emptyCounts = new int[nCols]; // null + zero combined
 
         for (int bi = 0; bi < baseSd.Times.Length; bi++)
         {
@@ -347,7 +346,8 @@ public static class Transformer
             // ── Cross-asset features ──────────────────────────────────────────
             WriteCrossAsset(vals, T, longSd, shortSd,
                 xauAi, xagAi, wtiAi, tltAi, shyAi, spyAi, vixyAi, udnAi,
-                base4hTi, tf1hShortTi, xaCols);
+                base4hTi, tf1hShortTi, xaCols,
+                indLogReturn, indRsi, indAtr);
 
             // ── Targets ───────────────────────────────────────────────────────
             bool hasTarget = false;
@@ -377,11 +377,24 @@ public static class Transformer
 
             if (!hasTarget) { skipped++; continue; }
 
-            rows.Add(new DatasetRow { Timestamp = T, Values = vals });
+            for (int ci = 0; ci < nCols; ci++)
+            {
+                var v = vals[ci];
+                if (!v.HasValue)        { nullCounts[ci]++; emptyCounts[ci]++; }
+                else if (v.Value == 0)  { zeroCounts[ci]++; emptyCounts[ci]++; }
+            }
+
+            var rowDict = new Dictionary<string, double?>(nCols);
+            for (int ci = 0; ci < nCols; ci++) rowDict[cols[ci]] = vals[ci];
+            rows.Add(new DatasetRow { Timestamp = T, Values = rowDict });
         }
 
+        var columnStats = new Dictionary<string, (int NullCount, int EmptyCount, int ZeroCount)>(nCols);
+        for (int ci = 0; ci < nCols; ci++)
+            columnStats[cols[ci]] = (nullCounts[ci], emptyCounts[ci], zeroCounts[ci]);
+
         Console.WriteLine($"[BuildFeatureMatrix] {rows.Count} rows assembled, {skipped} skipped (no target data).");
-        return (rows, columns.ToArray());
+        return (rows, cols, columnStats);
     }
 
     /// <summary>
@@ -405,8 +418,9 @@ public static class Transformer
         foreach (var row in rows)
             for (int ci = 0; ci < nCols; ci++)
             {
-                if (row.Values[ci] == null)  { nullCounts[ci]++; zeroCounts[ci]++; }
-                else if (row.Values[ci] == 0) zeroCounts[ci]++;
+                row.Values.TryGetValue(columns[ci], out var v);
+                if (!v.HasValue)      { nullCounts[ci]++; zeroCounts[ci]++; }
+                else if (v.Value == 0)  zeroCounts[ci]++;
             }
 
         var keepIdx     = new List<int>(nCols);
@@ -434,8 +448,8 @@ public static class Transformer
 
         var newRows = rows.Select(row =>
         {
-            var next = new double?[keep.Length];
-            for (int i = 0; i < keep.Length; i++) next[i] = row.Values[keep[i]];
+            var next = new Dictionary<string, double?>(keep.Length);
+            foreach (var ci in keep) next[columns[ci]] = row.Values.GetValueOrDefault(columns[ci]);
             return new DatasetRow { Timestamp = row.Timestamp, Values = next };
         }).ToList();
 
@@ -468,11 +482,11 @@ public static class Transformer
         {
             sb.Clear();
             sb.Append(row.Timestamp.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture));
-            for (int i = 1; i < row.Values.Length; i++)
+            for (int i = 1; i < columns.Length; i++)
             {
                 sb.Append(',');
-                if (row.Values[i].HasValue)
-                    sb.Append(row.Values[i]!.Value.ToString("G6", CultureInfo.InvariantCulture));
+                if (row.Values.TryGetValue(columns[i], out var v) && v.HasValue)
+                    sb.Append(v.Value.ToString("G6", CultureInfo.InvariantCulture));
             }
             sw.WriteLine(sb);
         }
@@ -605,8 +619,8 @@ public static class Transformer
         sw.WriteLine("--- Missing Value Rates ---");
         var missing = new int[columns.Length];
         foreach (var row in rows)
-            for (int i = 0; i < row.Values.Length; i++)
-                if (!row.Values[i].HasValue) missing[i]++;
+            for (int i = 0; i < columns.Length; i++)
+                if (!row.Values.TryGetValue(columns[i], out var mv) || !mv.HasValue) missing[i]++;
         for (int i = 1; i < columns.Length; i++)
             if (missing[i] > 0)
                 sw.WriteLine($"  {columns[i]}: {missing[i]} ({100.0 * missing[i] / rows.Count:F1}%)");
@@ -619,8 +633,8 @@ public static class Transformer
             int count = 0; double sum = 0, sumSq = 0, mn = double.MaxValue, mx = double.MinValue;
             foreach (var row in rows)
             {
-                if (!row.Values[i].HasValue) continue;
-                var v = row.Values[i]!.Value;
+                if (!row.Values.TryGetValue(columns[i], out var rv) || !rv.HasValue) continue;
+                var v = rv.Value;
                 sum += v; sumSq += v * v; count++;
                 if (v < mn) mn = v;
                 if (v > mx) mx = v;
@@ -653,7 +667,7 @@ public static class Transformer
         {
             for (int ci = 0; ci < nCols; ci++)
             {
-                if (row.Values[ci] == null)
+                if (!row.Values.TryGetValue(columns[ci], out var v) || !v.HasValue)
                 {
                     nullCounts[ci]++;
                     if (nullSamples[ci].Count < 10)
@@ -765,31 +779,188 @@ public static class Transformer
             dict[c.Datetime] = c;
         }
 
-        // Compute all price indicators
-        Dictionary<DateTime, decimal> lrMap, smaMap, emaMap, rsiMap, rocMap, sdMap, atrMap, cciMap, wrMap, dhMap, dlMap, crMap, bsMap, uwMap, lwMap;
-        Dictionary<DateTime, BollingerValue> bbMap;
-        Dictionary<DateTime, StochasticValue> stMap;
-        Dictionary<DateTime, MacdValue> macdMap;
+        var indList = new List<double[]>();
         try
         {
-            lrMap    = PriceIndicators.LogReturn(dict);
-            smaMap   = PriceIndicators.Sma(dict, cfg.SmaPeriod);
-            emaMap   = PriceIndicators.Ema(dict, cfg.EmaPeriod);
-            rsiMap   = PriceIndicators.Rsi(dict, cfg.RsiPeriod);
-            rocMap   = PriceIndicators.Roc(dict, cfg.RocPeriod);
-            sdMap    = PriceIndicators.RollingStdDev(dict, cfg.StdDevPeriod);
-            atrMap   = PriceIndicators.Atr(dict, cfg.AtrPeriod);
-            bbMap    = PriceIndicators.BollingerBands(dict, cfg.BbPeriod);
-            cciMap   = PriceIndicators.Cci(dict, cfg.CciPeriod);
-            wrMap    = PriceIndicators.WilliamsR(dict, cfg.WilliamsRPeriod);
-            stMap    = PriceIndicators.Stochastic(dict, cfg.StochKPeriod, cfg.StochDPeriod);
-            macdMap  = PriceIndicators.Macd(dict, cfg.MacdFast, cfg.MacdSlow, cfg.MacdSignal);
-            crMap    = PriceIndicators.CandleRange(dict);
-            bsMap    = PriceIndicators.BodySize(dict);
-            uwMap    = PriceIndicators.UpperWick(dict);
-            lwMap    = PriceIndicators.LowerWick(dict);
-            dhMap    = PriceIndicators.DistanceFromHighN(dict, cfg.DistN);
-            dlMap    = PriceIndicators.DistanceFromLowN(dict, cfg.DistN);
+            // Pre-compute ATR maps (also used for candle shape normalization)
+            var atrMaps = cfg.AtrPeriods.Select(p => PriceIndicators.Atr(dict, p)).ToArray();
+
+            // ── LogReturn (period-independent) ───────────────────────────────
+            {
+                var map = PriceIndicators.LogReturn(dict);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) ? (double)v : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── SMA variants ─────────────────────────────────────────────────
+            foreach (var p in cfg.SmaPeriods)
+            {
+                var map = PriceIndicators.Sma(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) && close[i] != 0 ? (double)v / close[i] : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── EMA variants ─────────────────────────────────────────────────
+            foreach (var p in cfg.EmaPeriods)
+            {
+                var map = PriceIndicators.Ema(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) && close[i] != 0 ? (double)v / close[i] : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── RSI variants ─────────────────────────────────────────────────
+            foreach (var p in cfg.RsiPeriods)
+            {
+                var map = PriceIndicators.Rsi(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) ? (double)v / 50.0 - 1.0 : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── ROC variants ─────────────────────────────────────────────────
+            foreach (var p in cfg.RocPeriods)
+            {
+                var map = PriceIndicators.Roc(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) ? (double)v : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── StdDev variants ───────────────────────────────────────────────
+            foreach (var p in cfg.StdDevPeriods)
+            {
+                var map = PriceIndicators.RollingStdDev(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) && close[i] != 0 ? (double)v / Math.Abs(close[i]) : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── ATR variants (normalized by close) ────────────────────────────
+            foreach (var atrMap in atrMaps)
+            {
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    var raw = atrMap.TryGetValue(times[i], out var av) ? (double)av : double.NaN;
+                    arr[i] = !double.IsNaN(raw) && close[i] != 0 ? raw / close[i] : double.NaN;
+                }
+                indList.Add(arr);
+            }
+
+            // ── BB variants (Upper, Lower, Width per period) ──────────────────
+            foreach (var p in cfg.BbPeriods)
+            {
+                var map = PriceIndicators.BollingerBands(dict, p);
+                var upper = new double[n]; var lower = new double[n]; var width = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    if (map.TryGetValue(times[i], out var bb) && close[i] != 0)
+                    { upper[i] = (double)bb.Upper / close[i]; lower[i] = (double)bb.Lower / close[i]; width[i] = (double)bb.Bandwidth; }
+                    else upper[i] = lower[i] = width[i] = double.NaN;
+                }
+                indList.Add(upper); indList.Add(lower); indList.Add(width);
+            }
+
+            // ── CCI variants ──────────────────────────────────────────────────
+            foreach (var p in cfg.CciPeriods)
+            {
+                var map = PriceIndicators.Cci(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) ? Math.Max(-1.0, Math.Min(1.0, (double)v / 300.0)) : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── WilliamsR variants ────────────────────────────────────────────
+            foreach (var p in cfg.WilliamsRPeriods)
+            {
+                var map = PriceIndicators.WilliamsR(dict, p);
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = map.TryGetValue(times[i], out var v) ? (double)v / 50.0 + 1.0 : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── Stochastic variants (K + D pair per K-period) ─────────────────
+            foreach (var p in cfg.StochKPeriods)
+            {
+                var map = PriceIndicators.Stochastic(dict, p, cfg.StochDPeriod);
+                var kArr = new double[n]; var dArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    if (map.TryGetValue(times[i], out var st))
+                    { kArr[i] = (double)st.K / 50.0 - 1.0; dArr[i] = (double)st.D / 50.0 - 1.0; }
+                    else kArr[i] = dArr[i] = double.NaN;
+                }
+                indList.Add(kArr); indList.Add(dArr);
+            }
+
+            // ── MACD (single set) ─────────────────────────────────────────────
+            {
+                var map = PriceIndicators.Macd(dict, cfg.MacdFast, cfg.MacdSlow, cfg.MacdSignal);
+                var lineArr = new double[n]; var sigArr = new double[n]; var histArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    if (map.TryGetValue(times[i], out var md) && close[i] != 0)
+                    { lineArr[i] = (double)md.Line / close[i]; sigArr[i] = (double)md.Signal / close[i]; histArr[i] = (double)md.Histogram / close[i]; }
+                    else lineArr[i] = sigArr[i] = histArr[i] = double.NaN;
+                }
+                indList.Add(lineArr); indList.Add(sigArr); indList.Add(histArr);
+            }
+
+            // ── Candle shape (normalized by first ATR period) ──────────────────
+            {
+                var crMap = PriceIndicators.CandleRange(dict);
+                var bsMap = PriceIndicators.BodySize(dict);
+                var uwMap = PriceIndicators.UpperWick(dict);
+                var lwMap = PriceIndicators.LowerWick(dict);
+                var firstAtr = atrMaps[0];
+                var crArr = new double[n]; var bsArr = new double[n];
+                var uwArr = new double[n]; var lwArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    var raw = firstAtr.TryGetValue(times[i], out var av) ? (double)av : double.NaN;
+                    crArr[i] = crMap.TryGetValue(times[i], out var cr) && !double.IsNaN(raw) && raw > 0 ? (double)cr * close[i] / raw : double.NaN;
+                    bsArr[i] = bsMap.TryGetValue(times[i], out var bs) && !double.IsNaN(raw) && raw > 0 ? (double)bs * close[i] / raw : double.NaN;
+                    uwArr[i] = uwMap.TryGetValue(times[i], out var uw) && !double.IsNaN(raw) && raw > 0 ? (double)uw * close[i] / raw : double.NaN;
+                    lwArr[i] = lwMap.TryGetValue(times[i], out var lw) && !double.IsNaN(raw) && raw > 0 ? (double)lw * close[i] / raw : double.NaN;
+                }
+                indList.Add(crArr); indList.Add(bsArr); indList.Add(uwArr); indList.Add(lwArr);
+
+                var dhMap = PriceIndicators.DistanceFromHighN(dict, cfg.DistN);
+                var dlMap = PriceIndicators.DistanceFromLowN(dict, cfg.DistN);
+                var dhArr = new double[n]; var dlArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    dhArr[i] = dhMap.TryGetValue(times[i], out var dh) ? (double)dh : double.NaN;
+                    dlArr[i] = dlMap.TryGetValue(times[i], out var dl) ? (double)dl : double.NaN;
+                }
+                indList.Add(dhArr); indList.Add(dlArr);
+            }
+
+            // ── AccumDist z-score + AccumDistOsc ──────────────────────────────
+            {
+                var adRaw    = BuildIndicatorLookup(symInds, $"ad/{tf}");
+                var adoscRaw = BuildIndicatorLookup(symInds, $"adosc/{tf}");
+                var adTemp   = new double[n];
+                var adoscArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    adTemp[i]   = adRaw.TryGetValue(times[i], out var adv) ? adv : double.NaN;
+                    adoscArr[i] = adoscRaw.TryGetValue(times[i], out var ao) && close[i] != 0 ? ao / close[i] : double.NaN;
+                }
+                indList.Add(RollingZScore(adTemp, cfg.AdZScorePeriod));
+                indList.Add(adoscArr);
+            }
         }
         catch (Exception ex)
         {
@@ -800,109 +971,10 @@ public static class Transformer
                 Console.Error.WriteLine($"  First: {candles[0].Datetime:yyyy-MM-dd HH:mm:ss}  C={candles[0].Close}");
                 Console.Error.WriteLine($"  Last:  {candles[n-1].Datetime:yyyy-MM-dd HH:mm:ss}  C={candles[n-1].Close}");
             }
-
-            // Scan for the specific candle pair that breaks LogReturn
-            var ordered = dict.Values.Where(v => !v.IsFilled).OrderBy(v => v.Datetime).ToList();
-            for (int i = 1; i < ordered.Count; i++)
-            {
-                var ratio = (double)(ordered[i].Close / ordered[i - 1].Close);
-                var lr    = Math.Log(ratio);
-                if (!double.IsFinite(lr) || ex is OverflowException)
-                {
-                    try { _ = (decimal)lr; }
-                    catch
-                    {
-                        Console.Error.WriteLine($"  BAD LogReturn pair at index {i}:");
-                        Console.Error.WriteLine($"    prev [{i-1}] {ordered[i-1].Datetime:yyyy-MM-dd HH:mm:ss}  C={ordered[i-1].Close}");
-                        Console.Error.WriteLine($"    curr [{i  }] {ordered[i  ].Datetime:yyyy-MM-dd HH:mm:ss}  C={ordered[i  ].Close}");
-                        Console.Error.WriteLine($"    ratio={ratio}  log={lr}");
-                        System.Diagnostics.Debugger.Break();
-                        break;
-                    }
-                }
-            }
-
             throw;
         }
 
-        // Volume indicators from cache
-        var adRaw    = BuildIndicatorLookup(symInds, $"ad/{tf}");
-        var adoscRaw = BuildIndicatorLookup(symInds, $"adosc/{tf}");
-
-        // Allocate parallel indicator arrays
-        int nInds = IndicatorNames.Length;
-        var ind = new double[nInds][];
-        for (int ii = 0; ii < nInds; ii++) ind[ii] = new double[n];
-
-        // Temp raw AD for z-score
-        var adTemp = new double[n];
-
-        for (int i = 0; i < n; i++)
-        {
-            var dt  = times[i];
-            var cl  = close[i];
-            var atrRaw = atrMap.TryGetValue(dt, out var av) ? (double)av : double.NaN;
-            var atrNorm = !double.IsNaN(atrRaw) && cl != 0 ? atrRaw / cl : double.NaN;
-
-            ind[0][i] = lrMap.TryGetValue(dt,  out var lr) ? (double)lr                       : double.NaN; // LogReturn
-            ind[1][i] = smaMap.TryGetValue(dt,  out var sm) && cl != 0 ? (double)sm / cl       : double.NaN; // SMA/close
-            ind[2][i] = emaMap.TryGetValue(dt,  out var em) && cl != 0 ? (double)em / cl       : double.NaN; // EMA/close
-            ind[3][i] = rsiMap.TryGetValue(dt,  out var rs) ? (double)rs / 50.0 - 1.0          : double.NaN; // RSI→[-1,1]
-            ind[4][i] = rocMap.TryGetValue(dt,  out var ro) ? (double)ro                       : double.NaN; // ROC
-            ind[5][i] = sdMap.TryGetValue(dt,   out var sd) && cl != 0 ? (double)sd / Math.Abs(cl) : double.NaN; // StdDev/close
-            ind[6][i] = atrNorm;                                                                               // ATR/close
-
-            if (bbMap.TryGetValue(dt, out var bb) && cl != 0)
-            {
-                ind[7][i] = (double)bb.Upper / cl;   // BbUpper/close
-                ind[8][i] = (double)bb.Lower / cl;   // BbLower/close
-                ind[9][i] = (double)bb.Bandwidth;    // BbWidth (already normalized)
-            }
-            else ind[7][i] = ind[8][i] = ind[9][i] = double.NaN;
-
-            // CCI → clip CCI/100 at ±3, then /3 → [-1,1]
-            ind[10][i] = cciMap.TryGetValue(dt, out var cc)
-                ? Math.Max(-1.0, Math.Min(1.0, (double)cc / 300.0))
-                : double.NaN;
-
-            ind[11][i] = wrMap.TryGetValue(dt, out var wr)  ? (double)wr / 50.0 + 1.0         : double.NaN; // WilliamsR→[-1,1]
-
-            if (stMap.TryGetValue(dt, out var st))
-            {
-                ind[12][i] = (double)st.K / 50.0 - 1.0;  // StochK→[-1,1]
-                ind[13][i] = (double)st.D / 50.0 - 1.0;  // StochD→[-1,1]
-            }
-            else ind[12][i] = ind[13][i] = double.NaN;
-
-            if (macdMap.TryGetValue(dt, out var md) && cl != 0)
-            {
-                ind[14][i] = (double)md.Line      / cl;   // MacdLine/close
-                ind[15][i] = (double)md.Signal    / cl;   // MacdSignal/close
-                ind[16][i] = (double)md.Histogram / cl;   // MacdHist/close
-            }
-            else ind[14][i] = ind[15][i] = ind[16][i] = double.NaN;
-
-            // Candle shape / ATR
-            ind[17][i] = crMap.TryGetValue(dt, out var cr) && !double.IsNaN(atrRaw) && atrRaw > 0
-                ? (double)cr * cl / atrRaw : double.NaN;  // (H-L)/ATR
-            ind[18][i] = bsMap.TryGetValue(dt, out var bs) && !double.IsNaN(atrRaw) && atrRaw > 0
-                ? (double)bs * cl / atrRaw : double.NaN;  // |C-O|/ATR
-            ind[19][i] = uwMap.TryGetValue(dt, out var uw) && !double.IsNaN(atrRaw) && atrRaw > 0
-                ? (double)uw * cl / atrRaw : double.NaN;  // UpperWick/ATR
-            ind[20][i] = lwMap.TryGetValue(dt, out var lw) && !double.IsNaN(atrRaw) && atrRaw > 0
-                ? (double)lw * cl / atrRaw : double.NaN;  // LowerWick/ATR
-
-            ind[21][i] = dhMap.TryGetValue(dt, out var dh) ? (double)dh : double.NaN; // DistHigh
-            ind[22][i] = dlMap.TryGetValue(dt, out var dl) ? (double)dl : double.NaN; // DistLow
-
-            adTemp[i]  = adRaw.TryGetValue(dt, out var adv) ? adv : double.NaN;
-            ind[24][i] = adoscRaw.TryGetValue(dt, out var ao) && cl != 0 ? ao / cl : double.NaN; // AccumDistOsc/close
-        }
-
-        // AccumDist z-score (rolling cfg.AdZScorePeriod bars)
-        ind[23] = RollingZScore(adTemp, cfg.AdZScorePeriod);
-
-        return new SeriesData { Times = times, Close = close, Indicators = ind };
+        return new SeriesData { Times = times, Close = close, Indicators = indList.ToArray() };
     }
 
     private static Dictionary<DateTime, double> BuildIndicatorLookup(
@@ -998,7 +1070,8 @@ public static class Transformer
         int xauAi, int xagAi, int wtiAi, int tltAi, int shyAi,
         int spyAi, int vixyAi, int udnAi,
         int tf4hLongTi, int tf1hShortTi,
-        int[] xaCols)
+        int[] xaCols,
+        int indLogReturn, int indRsi, int indAtr)
     {
         static double FloorClose(SeriesData?[][] ld, int ai, int ti, DateTime t)
         {
@@ -1028,21 +1101,43 @@ public static class Transformer
         Set(0, silver > 0 ? gold / silver : double.NaN);     // GoldSilverRatio
         Set(1, oil    > 0 ? gold / oil    : double.NaN);     // GoldOilRatio
 
-        // DXY mom via UDN LogReturn (ind[0]) — 1h short TF and 4h long TF
-        Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, T, 0)); // DXY_Mom_1h
-        Set(3, FloorInd(longSd,  udnAi, tf4hLongTi,  T, 0)); // DXY_Mom_4h
+        // DXY mom via UDN LogReturn — 1h short TF and 4h long TF
+        Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, T, indLogReturn)); // DXY_Mom_1h
+        Set(3, FloorInd(longSd,  udnAi, tf4hLongTi,  T, indLogReturn)); // DXY_Mom_4h
 
         Set(4, shy > 0 ? tlt / shy : double.NaN);            // YieldCurveProxy
 
-        // RiskSentiment: SPY RSI (ind[3]) - VIXY RSI (ind[3])
-        double spyRsi  = FloorInd(longSd, spyAi,  tf4hLongTi, T, 3);
-        double vixyRsi = FloorInd(longSd, vixyAi, tf4hLongTi, T, 3);
+        // RiskSentiment: SPY RSI - VIXY RSI
+        double spyRsi  = FloorInd(longSd, spyAi,  tf4hLongTi, T, indRsi);
+        double vixyRsi = FloorInd(longSd, vixyAi, tf4hLongTi, T, indRsi);
         Set(5, !double.IsNaN(spyRsi) && !double.IsNaN(vixyRsi) ? spyRsi - vixyRsi : double.NaN);
 
-        // VolatilityRegime: VIXY ATR/close (ind[6]) bucketed into 0/1/2
-        double vixyAtr = FloorInd(longSd, vixyAi, tf4hLongTi, T, 6);
+        // VolatilityRegime: VIXY ATR/close bucketed into 0/1/2
+        double vixyAtr = FloorInd(longSd, vixyAi, tf4hLongTi, T, indAtr);
         if (!double.IsNaN(vixyAtr))
             Set(6, vixyAtr < 0.02 ? 0.0 : vixyAtr < 0.05 ? 1.0 : 2.0);
+    }
+
+    // ── Private: indicator name generation ───────────────────────────────────
+
+    private static string[] BuildIndicatorNames(DatasetConfig cfg)
+    {
+        var names = new List<string>();
+        names.Add("LogReturn");
+        foreach (var p in cfg.SmaPeriods)       names.Add($"SMA_{p}");
+        foreach (var p in cfg.EmaPeriods)       names.Add($"EMA_{p}");
+        foreach (var p in cfg.RsiPeriods)       names.Add($"RSI_{p}");
+        foreach (var p in cfg.RocPeriods)       names.Add($"ROC_{p}");
+        foreach (var p in cfg.StdDevPeriods)    names.Add($"StdDev_{p}");
+        foreach (var p in cfg.AtrPeriods)       names.Add($"ATR_{p}");
+        foreach (var p in cfg.BbPeriods)        { names.Add($"BbUpper_{p}"); names.Add($"BbLower_{p}"); names.Add($"BbWidth_{p}"); }
+        foreach (var p in cfg.CciPeriods)       names.Add($"CCI_{p}");
+        foreach (var p in cfg.WilliamsRPeriods) names.Add($"WilliamsR_{p}");
+        foreach (var p in cfg.StochKPeriods)    { names.Add($"StochK_{p}"); names.Add($"StochD_{p}"); }
+        names.Add("MacdLine"); names.Add("MacdSignal"); names.Add("MacdHist");
+        names.Add("CandleRange"); names.Add("BodySize"); names.Add("UpperWick"); names.Add("LowerWick");
+        names.Add("DistHigh"); names.Add("DistLow"); names.Add("AccumDist"); names.Add("AccumDistOsc");
+        return names.ToArray();
     }
 
     // ── Private: utilities ────────────────────────────────────────────────────

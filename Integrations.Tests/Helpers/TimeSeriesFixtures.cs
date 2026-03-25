@@ -72,10 +72,10 @@ public static class TimeSeriesFixtures
 
         var repoMock = new Mock<IRepository<TimeSeriesCacheDocument>>();
         repoMock
-            .Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(cachedDoc);
         repoMock
-            .Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<TimeSeriesCacheDocument>(), It.IsAny<CancellationToken>()))
+            .Setup(r => r.SaveAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<TimeSeriesCacheDocument>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         var start = startDate ?? new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc);

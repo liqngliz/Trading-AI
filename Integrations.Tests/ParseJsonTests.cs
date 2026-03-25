@@ -78,21 +78,20 @@ public class ParseJsonTests
     }
 
     [Fact]
-    public void ParseJson_ErrorStatusButCode200_DoesNotReturnEmpty()
+    public void ParseJson_ErrorStatusWithCode200_ThrowsInvalidOperationException()
     {
-        // Only code 400 with the specific message triggers "no data" handling
+        // Unrecognised error codes (not 400/429/404) throw regardless of values array
         var json = """{"status":"error","code":200,"message":"Something else","values":[]}""";
-        var result = TwelveDataSeries.ParseJson(json);
-        Assert.Empty(result); // empty values array, not a "no data" route
+        Assert.Throws<InvalidOperationException>(() =>
+            TwelveDataSeries.ParseJson(json));
     }
 
     [Fact]
-    public void ParseJson_ErrorCode400ButDifferentMessage_DoesNotReturnEarly()
+    public void ParseJson_ErrorCode400AnyMessage_ReturnsEmpty()
     {
-        // message does not contain "No data is available on the specified dates"
+        // All code=400 responses are treated as "no data" — message is not checked
         var json = """{"status":"error","code":400,"message":"Invalid API key."}""";
-        // Should fall through to missing "values" check and throw
-        Assert.Throws<InvalidOperationException>(() =>
-            TwelveDataSeries.ParseJson(json));
+        var result = TwelveDataSeries.ParseJson(json);
+        Assert.Empty(result);
     }
 }
