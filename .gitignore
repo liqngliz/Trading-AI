@@ -9,6 +9,11 @@ appsettings.dev.json
 **/appsettings.dev.json
 
 Cache\.gitkeep
+
+# Dataset outputs — preserve folder structure but ignore generated files
+Dataset/**
+!Dataset/**/
+!Dataset/**/.gitkeep
 .claude
 .DS_Store
 .DS_Store

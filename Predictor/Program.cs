@@ -5,8 +5,7 @@ using Predictor;
 //   dotnet run -- --dataset /path/to/Dataset --models /path/to/Models
 
 var datasetDir = GetArg(args, "--dataset")
-    ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory,
-        "..", "..", "..", "..", "Importer", "bin", "Debug", "net8.0", "Dataset"));
+    ?? Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset", "Training"));
 
 var modelDir = GetArg(args, "--models")
     ?? Path.Combine(datasetDir, "Models");

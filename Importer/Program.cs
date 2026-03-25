@@ -304,24 +304,26 @@ Console.WriteLine("\n\n=== TRANSFORMER: building XAU/USD 4h dataset ===");
 
 var trainingStart = commonStartByTf.TryGetValue("4h", out var cs4h) ? cs4h : (DateTime?)null;
 
+var datasetRoot  = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset"));
+var trainingDir  = Path.Combine(datasetRoot, "Training");
+
 var cfg = new DatasetConfig
 {
     TargetSymbol       = "XAU/USD",
     TargetHorizons     = [("4h", 1), ("8h", 1), ("1day", 1), ("1week", 1)],
     TrainingStartDate  = trainingStart,
-    OutputDirectory    = Path.Combine(AppContext.BaseDirectory, "Dataset")
+    OutputDirectory    = trainingDir   // fold CSVs written here by CreateWalkForwardSplits
 };
 
 var (rows, columns, columnStats) = Transformer.BuildFeatureMatrix(cfg, allCandles, allIndicators);
 
 if (rows.Count > 0)
 {
-    var csvPath      = Path.Combine(cfg.OutputDirectory, "xauusd_4h_dataset.csv");
-    var bucketedPath = Path.Combine(cfg.OutputDirectory, "xauusd_4h_dataset_bucketed.csv");
-    var reportPath   = Path.Combine(cfg.OutputDirectory, "xauusd_4h_report.txt");
-
-    var nullReportPath    = Path.Combine(cfg.OutputDirectory, "xauusd_4h_null_report.json");
-    var prunedColsPath    = Path.Combine(cfg.OutputDirectory, "xauusd_4h_pruned_columns.txt");
+    var csvPath      = Path.Combine(trainingDir,  "xauusd_4h_dataset.csv");
+    var bucketedPath = Path.Combine(trainingDir,  "xauusd_4h_dataset_bucketed.csv");
+    var reportPath   = Path.Combine(datasetRoot,  "xauusd_4h_report.txt");
+    var nullReportPath   = Path.Combine(datasetRoot,  "xauusd_4h_null_report.json");
+    var prunedColsPath   = Path.Combine(datasetRoot,  "xauusd_4h_pruned_columns.txt");
 
     (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath);
 
