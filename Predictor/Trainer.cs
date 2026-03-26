@@ -1,9 +1,17 @@
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.ML;
 using Microsoft.ML.Data;
-using Microsoft.ML.Trainers.LightGbm;
+using Microsoft.ML.Trainers.FastTree;
 
 namespace Predictor;
+
+// Schema used for ML.NET DataView — Features vector + Label scalar
+public sealed class ModelInput
+{
+    public float[] Features { get; set; } = [];
+    public float   Label    { get; set; }
+}
 
 public static class Trainer
 {
@@ -18,17 +26,15 @@ public static class Trainer
 
         var mlContext = new MLContext(seed: 42);
 
-        // ── Discover schema from CSV header ───────────────────────────────────
+        // ── Discover schema ────────────────────────────────────────────────────
 
         var allCols = File.ReadLines(fullCsvPath).First().Split(',');
 
-        // Features: every column except Timestamp and any _Target_ column
         var featureCols = allCols
             .Skip(1)
             .Where(c => !c.Contains("_Target_"))
             .ToArray();
 
-        // Targets: _Return columns only (skip _Quintile — derived labels)
         var targetCols = allCols
             .Where(c => c.Contains("_Target_") && c.EndsWith("_Return"))
             .ToArray();
@@ -36,28 +42,11 @@ public static class Trainer
         Console.WriteLine($"Features : {featureCols.Length}");
         Console.WriteLine($"Targets  : {string.Join(", ", targetCols)}");
 
-        // ── Build TextLoader ───────────────────────────────────────────────────
-
-        var loaderColumns = new[] { new TextLoader.Column("Timestamp", DataKind.String, 0) }
-            .Concat(allCols.Skip(1).Select((name, i) =>
-                new TextLoader.Column(name, DataKind.Single, i + 1)))
-            .ToArray();
-
-        var loaderOptions = new TextLoader.Options
-        {
-            Columns            = loaderColumns,
-            HasHeader          = true,
-            Separators         = [','],
-            MissingRealsAsNaNs = true,
-        };
-
-        var loader = mlContext.Data.CreateTextLoader(loaderOptions);
-
-        // ── Discover walk-forward fold files ──────────────────────────────────
+        var colIndex   = allCols.Select((n, i) => (n, i)).ToDictionary(x => x.n, x => x.i);
+        var featureIdx = featureCols.Select(c => colIndex[c]).ToArray();
 
         var foldTrainFiles = Directory.GetFiles(datasetDir, "fold_*_train.csv")
-            .OrderBy(f => f)
-            .ToArray();
+            .OrderBy(f => f).ToArray();
 
         Console.WriteLine($"Folds    : {foldTrainFiles.Length}");
 
@@ -69,7 +58,7 @@ public static class Trainer
             Console.WriteLine($"Target: {targetCol}");
             Console.WriteLine(new string('=', 60));
 
-            var pipeline = BuildPipeline(mlContext, featureCols, targetCol);
+            int targetIdx = colIndex[targetCol];
 
             // Walk-forward cross-validation
             if (foldTrainFiles.Length > 0)
@@ -86,39 +75,50 @@ public static class Trainer
                     var foldName = Path.GetFileNameWithoutExtension(trainFile)
                         .Replace("_train", "");
 
-                    var trainData = mlContext.Data.FilterRowsByMissingValues(
-                        loader.Load(trainFile), targetCol);
-                    var valData = mlContext.Data.FilterRowsByMissingValues(
-                        loader.Load(valFile), targetCol);
+                    var (rawTrainF, trainL) = LoadCsv(trainFile, featureIdx, targetIdx);
+                    var (rawValF,   valL)   = LoadCsv(valFile,   featureIdx, targetIdx);
+                    if (trainL.Length == 0 || valL.Length == 0) continue;
 
                     var sw = Stopwatch.StartNew();
-                    var model      = pipeline.Fit(trainData);
-                    var predictions = model.Transform(valData);
-                    var metrics    = mlContext.Regression.Evaluate(
-                        predictions, labelColumnName: targetCol);
-                    sw.Stop();
 
-                    var rowCount = mlContext.Data.CreateEnumerable<object>(
-                        valData, reuseRowObject: false).LongCount();
+                    // Fit imputer on training fold only — apply to both sets
+                    var imputer = new KnnImputer(k: 5, maxDistanceCols: 100);
+                    imputer.Fit(rawTrainF);
+                    var trainF = imputer.Transform(rawTrainF);
+                    var valF   = imputer.Transform(rawValF);
+
+                    var trainView = ToDataView(mlContext, trainF, trainL, featureCols.Length);
+                    var valView   = ToDataView(mlContext, valF,   valL,   featureCols.Length);
+
+                    var model       = BuildPipeline(mlContext).Fit(trainView);
+                    var predictions = model.Transform(valView);
+                    var metrics     = mlContext.Regression.Evaluate(
+                        predictions, labelColumnName: "Label");
+                    sw.Stop();
 
                     Console.WriteLine(
                         $"  {foldName,-10} {metrics.RootMeanSquaredError,10:F6} " +
                         $"{metrics.MeanAbsoluteError,10:F6} {metrics.RSquared,8:F4} " +
-                        $"{rowCount,8}  ({sw.Elapsed.TotalSeconds:F1}s)");
+                        $"{valL.Length,8}  ({sw.Elapsed.TotalSeconds:F1}s)");
                 }
             }
 
-            // Final model trained on the full dataset
-            Console.WriteLine($"\nTraining final model on full dataset...");
+            // Final model on full dataset
+            Console.WriteLine("\nTraining final model on full dataset...");
             var sw2 = Stopwatch.StartNew();
 
-            var fullData   = mlContext.Data.FilterRowsByMissingValues(
-                loader.Load(fullCsvPath), targetCol);
-            var finalModel = pipeline.Fit(fullData);
+            var (rawFullF, fullL) = LoadCsv(fullCsvPath, featureIdx, targetIdx);
+
+            var fullImputer = new KnnImputer(k: 5, maxDistanceCols: 100);
+            fullImputer.Fit(rawFullF);
+            var fullF    = fullImputer.Transform(rawFullF);
+            var fullView = ToDataView(mlContext, fullF, fullL, featureCols.Length);
+
+            var finalModel = BuildPipeline(mlContext).Fit(fullView);
             sw2.Stop();
 
             var modelPath = Path.Combine(modelDir, $"{targetCol}.zip");
-            mlContext.Model.Save(finalModel, fullData.Schema, modelPath);
+            mlContext.Model.Save(finalModel, fullView.Schema, modelPath);
             Console.WriteLine($"Saved → {modelPath}  ({sw2.Elapsed.TotalSeconds:F1}s)");
         }
 
@@ -126,23 +126,82 @@ public static class Trainer
         Console.WriteLine("Training complete.");
     }
 
-    private static IEstimator<ITransformer> BuildPipeline(
-        MLContext mlContext,
-        string[] featureCols,
-        string labelCol)
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reads a CSV, returning a flat float[][] (features) and float[] (labels).
+    /// Rows where the label is missing or NaN are skipped.
+    /// Feature NaNs are preserved for the imputer to fill.
+    /// </summary>
+    private static (float[][] Features, float[] Labels) LoadCsv(
+        string path,
+        int[]  featureIndices,
+        int    labelIndex)
     {
-        return mlContext.Transforms
-            .Concatenate("Features", featureCols)
-            .Append(mlContext.Regression.Trainers.LightGbm(
-                new LightGbmRegressionTrainer.Options
-                {
-                    LabelColumnName            = labelCol,
-                    FeatureColumnName          = "Features",
-                    NumberOfLeaves             = 63,
-                    MinimumExampleCountPerLeaf = 20,
-                    LearningRate               = 0.05,
-                    NumberOfIterations         = 500,
-                    Verbose                    = false,
-                }));
+        var featuresList = new List<float[]>();
+        var labelsList   = new List<float>();
+
+        foreach (var line in File.ReadLines(path).Skip(1))
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
+
+            var parts = line.Split(',');
+
+            if (labelIndex >= parts.Length || string.IsNullOrEmpty(parts[labelIndex])) continue;
+            if (!float.TryParse(parts[labelIndex], NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var label)) continue;
+            if (float.IsNaN(label)) continue;
+
+            var features = new float[featureIndices.Length];
+            for (int i = 0; i < featureIndices.Length; i++)
+            {
+                int fi = featureIndices[i];
+                features[i] = fi < parts.Length
+                    && !string.IsNullOrEmpty(parts[fi])
+                    && float.TryParse(parts[fi], NumberStyles.Float,
+                           CultureInfo.InvariantCulture, out var fv)
+                    ? fv
+                    : float.NaN;
+            }
+
+            featuresList.Add(features);
+            labelsList.Add(label);
+        }
+
+        return (featuresList.ToArray(), labelsList.ToArray());
     }
+
+    /// <summary>
+    /// Creates an ML.NET IDataView from imputed feature arrays and labels.
+    /// The Features column is declared as a fixed-size float vector so
+    /// FastTree can determine the feature count from the schema.
+    /// </summary>
+    private static IDataView ToDataView(
+        MLContext mlContext,
+        float[][] features,
+        float[]   labels,
+        int       numFeatures)
+    {
+        var rows = features
+            .Zip(labels, (f, l) => new ModelInput { Features = f, Label = l });
+
+        // Declare Features as a fixed-size vector in the schema
+        var schemaDef = SchemaDefinition.Create(typeof(ModelInput));
+        schemaDef["Features"].ColumnType =
+            new VectorDataViewType(NumberDataViewType.Single, numFeatures);
+
+        return mlContext.Data.LoadFromEnumerable(rows, schemaDef);
+    }
+
+    private static IEstimator<ITransformer> BuildPipeline(MLContext mlContext) =>
+        mlContext.Regression.Trainers.FastTree(
+            new FastTreeRegressionTrainer.Options
+            {
+                LabelColumnName            = "Label",
+                FeatureColumnName          = "Features",
+                NumberOfLeaves             = 63,
+                MinimumExampleCountPerLeaf = 20,
+                LearningRate               = 0.05,
+                NumberOfTrees              = 500,
+            });
 }
