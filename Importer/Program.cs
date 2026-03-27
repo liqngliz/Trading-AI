@@ -93,7 +93,7 @@ void MarkUnavailable(string symbol, string reason)
 }
 
 // Note: "1month" is excluded — variable month lengths cause cache timestamp misalignment.
-string[] intervals = ["15min", "30min", "1h", "2h", "4h", "8h", "1day", "1week"];
+string[] intervals = ["15min", "30min", "1h", "4h", "1day", "1week"];
 
 // Transformer data: symbol → interval → sorted candles / indicator values
 var allCandles       = new Dictionary<string, Dictionary<string, List<TimeSeriesValue>>>(StringComparer.OrdinalIgnoreCase);
@@ -103,6 +103,8 @@ var commonStartByTf  = new Dictionary<string, DateTime>(StringComparer.Ordinal);
 var fetchStart = new DateTime(1990, 1, 1, 0, 0, 0);
 var fetchEnd = DateTime.UtcNow.Date;
 
+var datasetRoot  = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset"));
+
 string[] symbols =
 [
     // Precious metals
@@ -110,13 +112,18 @@ string[] symbols =
     // Forex
     "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH",
     // ETFs
-    "XMTH", "SUOD", "SHY", "IEF", "TLT", "SPY", "EEM", "ZGLD","ZSL", "DGZ", "NDAQ", "QQQ", "IYY", "WORLD",
+    // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
+    "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "QQQ", "IYY",
     // Oil ETFs
-    "3SOI", "LOIL",
+    // Removed (short history on 1day/1week, binding training start): "3SOI"
+    // Removed (UK-listed ETF, no intraday data before 2022, causes 249 fully-NaN cols in early folds): "LOIL"
     // Commodities
-    "WTI/USD", "CL1", "NG/USD", "HG1", "C_1", "C_1",
+    // Removed (short history): "CL1", "C_1", "NG/USD"
+    // Removed (US-hours-only futures, 73-86% NaN on 4h): "HG1"
+    "WTI/USD",
     // Indices
-    "VIXY", "SVIX", "UDN", "UUP"
+    // Removed (started Aug 2022, was binding training start to 3.5 years): "SVIX"
+    "VIXY", "UDN", "UUP"
 ];
 
 TwelveDataEndpoint[] volumeEndpoints =
@@ -220,6 +227,18 @@ foreach (var interval in intervals)
     commonStartByTf[interval] = commonStart;
     Console.WriteLine($"\nCommon start: {commonStart:yyyy-MM-dd}  ({trimmedBySymbol.Count}/{symbols.Length} symbols with data)");
 
+    // ── Write per-symbol start dates to report (append each interval) ─────────
+    var commonStartReportPath = Path.Combine(datasetRoot, "common_start_report.txt");
+    var symbolStartLines = trimmedBySymbol
+        .Select(kvp => (symbol: kvp.Key, start: kvp.Value.Keys.Min()))
+        .OrderByDescending(x => x.start)
+        .Select(x => $"  {x.start:yyyy-MM-dd}  {x.symbol}");
+    var isFirstInterval = !File.Exists(commonStartReportPath) || interval == intervals[0];
+    if (isFirstInterval) File.WriteAllText(commonStartReportPath, "");
+    File.AppendAllText(commonStartReportPath,
+        $"\n[{interval}]  common start: {commonStart:yyyy-MM-dd}\n" +
+        string.Join("\n", symbolStartLines) + "\n");
+
     // RVOL needs a warm-up period of at least 20 bars before commonStart.
     // For 1week, 20 bars = 140 days; for all shorter intervals 20 calendar days covers 20+ bars.
     var rvolLookback = interval == "1week" ? TimeSpan.FromDays(140) : TimeSpan.FromDays(20);
@@ -302,15 +321,26 @@ foreach (var interval in intervals)
 
 Console.WriteLine("\n\n=== TRANSFORMER: building XAU/USD 4h dataset ===");
 
-var trainingStart = commonStartByTf.TryGetValue("4h", out var cs4h) ? cs4h : (DateTime?)null;
+// TrainingStartDate must be the latest common start across ALL long timeframes so that
+// every training row has complete data for 4h, 1day and 1week features.
+var trainingStart = DatasetConfig.LongTimeframes
+    .Where(commonStartByTf.ContainsKey)
+    .Select(tf => commonStartByTf[tf])
+    .DefaultIfEmpty()
+    .Max() is DateTime ts && ts != default ? (DateTime?)ts : null;
 
-var datasetRoot  = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset"));
+Console.WriteLine($"Training start (max of long TF common starts):");
+foreach (var tf in DatasetConfig.LongTimeframes)
+    if (commonStartByTf.TryGetValue(tf, out var d))
+        Console.WriteLine($"  {tf,-8} {d:yyyy-MM-dd}{(d == trainingStart ? "  ← binding" : "")}");
+
+
 var trainingDir  = Path.Combine(datasetRoot, "Training");
 
 var cfg = new DatasetConfig
 {
     TargetSymbol       = "XAU/USD",
-    TargetHorizons     = [("4h", 1), ("8h", 1), ("1day", 1), ("1week", 1)],
+    TargetHorizons     = [("4h", 1)],
     TrainingStartDate  = trainingStart,
     OutputDirectory    = trainingDir   // fold CSVs written here by CreateWalkForwardSplits
 };
@@ -325,7 +355,7 @@ if (rows.Count > 0)
     var nullReportPath   = Path.Combine(datasetRoot,  "xauusd_4h_null_report.json");
     var prunedColsPath   = Path.Combine(datasetRoot,  "xauusd_4h_pruned_columns.txt");
 
-    (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath);
+    (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath, threshold: 0.7);
 
     Transformer.ExportToCsv(rows, columns, csvPath);
     Transformer.BucketTargets(csvPath, bucketedPath);

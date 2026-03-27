@@ -42,6 +42,8 @@ public class BuildFeatureMatrixTests
         MacdSignal         = 2,
         DistN              = 2,
         AdZScorePeriod     = 2,
+        RealizedVolPeriod  = 0,   // disabled: fixture has < 20 bars
+        VolRatioMaPeriod   = 0,
         TrainingStartDate  = trainingStart,
     };
 

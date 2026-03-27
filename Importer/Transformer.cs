@@ -13,48 +13,66 @@ public sealed class DatasetConfig
 {
     public static readonly string[] AllAssets =
     [
-        "XAU/USD", "XAG/USD", "XPT/USD", "XPD/USD",
-        "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH",
-        "XMTH", "SUOD", "SHY", "IEF", "TLT", "SPY", "EEM", "ZGLD", "ZSL", "DGZ",
-        "NDAQ", "QQQ", "IYY", "WORLD",
-        "3SOI", "LOIL",
-        "WTI/USD", "CL1", "NG/USD", "HG1", "C_1",
-        "VIXY", "SVIX", "UDN", "UUP"
+    // Precious metals
+    "XAU/USD", "XAG/USD", "XPT/USD", "XPD/USD",
+    // Forex
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH",
+    // ETFs
+    // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
+    "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "QQQ", "IYY",
+    // Oil ETFs
+    // Removed (short history on 1day/1week, binding training start): "3SOI"
+    // Removed (UK-listed ETF, no intraday data before 2022, causes 249 fully-NaN cols in early folds): "LOIL"
+    // Commodities
+    // Removed (short history): "CL1", "C_1", "NG/USD"
+    // Removed (US-hours-only futures, 73-86% NaN on 4h): "HG1"
+    "WTI/USD",
+    // Indices
+    // Removed (started Aug 2022, was binding training start to 3.5 years): "SVIX"
+    "VIXY", "UDN", "UUP"
     ];
 
-    public static readonly string[] ShortTimeframes = ["15min", "30min", "1h", "2h"];
-    public static readonly string[] LongTimeframes   = ["4h", "8h", "1day", "1week"];
+    public static readonly string[] ShortTimeframes = ["15min", "30min", "1h"];
+    public static readonly string[] LongTimeframes   = ["4h", "1day", "1week"];
 
     /// <summary>Symbol to predict. Must exist in <see cref="AllAssets"/>.</summary>
     public string TargetSymbol { get; init; } = "XAU/USD";
 
     /// <summary>Horizons as (timeframe, barsAhead) pairs.</summary>
     public List<(string Tf, int BarsAhead)> TargetHorizons { get; init; } =
-        [("4h", 1), ("8h", 1), ("1day", 1), ("1week", 1)];
+        [("4h", 1), ("1day", 1), ("1week", 1)];
 
     /// <summary>Aggregation statistics applied over short-TF windows.</summary>
     public string[] AggStats { get; init; } = ["mean", "min", "max", "last", "std"];
 
     // Indicator periods — 5 per indicator: shortest, short, medium, long, longest
-    public int[] SmaPeriods       { get; init; } = [14, 25, 50, 100, 200];
-    public int[] EmaPeriods       { get; init; } = [14, 25, 50, 100, 200];
-    public int[] RsiPeriods       { get; init; } = [7, 14, 21, 28, 50];
-    public int[] RocPeriods       { get; init; } = [1, 5, 14, 21, 50];
-    public int[] StdDevPeriods    { get; init; } = [10, 20, 50, 100, 200];
-    public int[] AtrPeriods       { get; init; } = [7, 14, 21, 50, 100];
-    public int[] BbPeriods        { get; init; } = [10, 20, 50, 100, 200];
-    public int[] CciPeriods       { get; init; } = [10, 20, 50, 100, 200];
-    public int[] WilliamsRPeriods { get; init; } = [7, 14, 21, 28, 50];
-    public int[] StochKPeriods    { get; init; } = [5, 14, 21, 28, 50];
-    public int StochDPeriod       { get; init; } = 3;
+    public int[] SmaPeriods       { get; init; } = [];
+    public int[] EmaPeriods       { get; init; } = [24, 50];
+    public int[] RsiPeriods       { get; init; } = [24];
+    public int[] RocPeriods       { get; init; } = [];
+    public int[] StdDevPeriods    { get; init; } = [];
+    public int[] AtrPeriods       { get; init; } = [14];
+    public int[] BbPeriods        { get; init; } = [20];
+    /// <summary>Lookback for rolling z-score of BB bandwidth (compression detector). 0 = disabled.</summary>
+    public int   BbWidthZPeriod   { get; init; } = 100;
+    public int[] CciPeriods       { get; init; } = [14];
+    public int[] WilliamsRPeriods { get; init; } = [];
+    public int[] StochKPeriods    { get; init; } = [];
+    public int[] AdxPeriods       { get; init; } = [14];
+    public int StochDPeriod       { get; init; } = 0;
     public int MacdFast           { get; init; } = 12;
     public int MacdSlow           { get; init; } = 26;
     public int MacdSignal         { get; init; } = 9;
     public int DistN              { get; init; } = 20;
     public int AdZScorePeriod     { get; init; } = 252;
 
-    public int WalkForwardFolds { get; init; } = 5;
-    public int PurgeBarsGap     { get; init; } = 2;   // in 4h bars
+    /// <summary>Window (bars) for rolling std of log-returns on target symbol 4h series. 0 = disabled.</summary>
+    public int RealizedVolPeriod  { get; init; } = 20;
+    /// <summary>Window (bars) for rolling mean of realized vol used in the vol ratio. 0 = disabled.</summary>
+    public int VolRatioMaPeriod   { get; init; } = 200;
+
+    public int WalkForwardFolds { get; init; } = 10;
+    public int PurgeBarsGap     { get; init; } = 50;  // in 4h bars (~200 hours; prevents regime autocorrelation leaking across the train/val boundary)
 
     /// <summary>
     /// Earliest timestamp to include in the dataset (inclusive).
@@ -190,6 +208,12 @@ public static class Transformer
         }
 
         var targetSafe = SafeSymbol(cfg.TargetSymbol);
+        if (cfg.RealizedVolPeriod > 0)
+            AddCol($"{targetSafe}_RealizedVol_{cfg.RealizedVolPeriod}");
+        if (cfg.RealizedVolPeriod > 0 && cfg.VolRatioMaPeriod > 0)
+            AddCol($"{targetSafe}_VolRatio_{cfg.RealizedVolPeriod}_{cfg.VolRatioMaPeriod}");
+        if (cfg.RealizedVolPeriod > 0)
+            AddCol($"{targetSafe}_TargetVolScalar");
         foreach (var (tf, _) in cfg.TargetHorizons) AddCol($"{targetSafe}_Target_{tf}_Return");
         foreach (var (tf, _) in cfg.TargetHorizons) AddCol($"{targetSafe}_Target_{tf}_Quintile");
 
@@ -259,6 +283,51 @@ public static class Transformer
             return ([], columns.ToArray(), []);
         }
 
+        // ── Pre-compute realized vol and vol ratio for target symbol (4h) ─────
+        int nBars = baseSd.Times.Length;
+        var realizedVols = new double?[nBars];
+        var volRatios    = new double?[nBars];
+
+        if (cfg.RealizedVolPeriod > 0)
+        {
+            var logRets = new double?[nBars];
+            for (int i = 1; i < nBars; i++)
+            {
+                double c0 = baseSd.Close[i - 1], c1 = baseSd.Close[i];
+                if (c0 > 0) logRets[i] = Math.Log(c1 / c0);
+            }
+
+            for (int i = cfg.RealizedVolPeriod - 1; i < nBars; i++)
+            {
+                double sum = 0, sumSq = 0; int cnt = 0;
+                for (int j = i - cfg.RealizedVolPeriod + 1; j <= i; j++)
+                {
+                    if (!logRets[j].HasValue) continue;
+                    sum += logRets[j]!.Value; sumSq += logRets[j]!.Value * logRets[j]!.Value; cnt++;
+                }
+                if (cnt >= 2)
+                {
+                    double mean = sum / cnt;
+                    realizedVols[i] = Math.Sqrt(Math.Max(0, sumSq / cnt - mean * mean));
+                }
+            }
+
+            if (cfg.VolRatioMaPeriod > 0)
+            {
+                for (int i = cfg.VolRatioMaPeriod - 1; i < nBars; i++)
+                {
+                    if (!realizedVols[i].HasValue) continue;
+                    double maSum = 0; int maCnt = 0;
+                    for (int j = i - cfg.VolRatioMaPeriod + 1; j <= i; j++)
+                    {
+                        if (realizedVols[j].HasValue) { maSum += realizedVols[j]!.Value; maCnt++; }
+                    }
+                    if (maCnt > 0 && maSum > 0)
+                        volRatios[i] = realizedVols[i]!.Value / (maSum / maCnt);
+                }
+            }
+        }
+
         // Pre-look up cross-asset SeriesData indices
         int xauAi  = Array.IndexOf(DatasetConfig.AllAssets, "XAU/USD");
         int xagAi  = Array.IndexOf(DatasetConfig.AllAssets, "XAG/USD");
@@ -271,6 +340,32 @@ public static class Transformer
         int tf1hShortTi = Array.IndexOf(DatasetConfig.ShortTimeframes, "1h");
         // cross-asset DXY mom uses 1h short and 4h long UDN
 
+        // ── Pre-compute cross-asset ratio z-scores ────────────────────────────
+        // Raw price ratios (gold/silver, gold/oil) are non-stationary: as gold
+        // trends the level drifts, letting the model learn which regime/year it
+        // is in rather than a genuine cross-asset signal.  Z-scoring over a
+        // rolling window removes the level before the model sees the values.
+        var sdXau4h = xauAi >= 0 && base4hTi >= 0 ? longSd[xauAi][base4hTi] : null;
+        var sdXag4h = xagAi >= 0 && base4hTi >= 0 ? longSd[xagAi][base4hTi] : null;
+        var sdWti4h = wtiAi >= 0 && base4hTi >= 0 ? longSd[wtiAi][base4hTi] : null;
+        var gsRatioRaw = new double[nBars];
+        var goRatioRaw = new double[nBars];
+        for (int i = 0; i < nBars; i++)
+        {
+            var t       = baseSd.Times[i];
+            int gi      = sdXau4h != null ? BsFloor(sdXau4h.Times, t) : -1;
+            int agi     = sdXag4h != null ? BsFloor(sdXag4h.Times, t) : -1;
+            int wi      = sdWti4h != null ? BsFloor(sdWti4h.Times, t) : -1;
+            double gold   = gi  >= 0 ? sdXau4h!.Close[gi]  : double.NaN;
+            double silver = agi >= 0 ? sdXag4h!.Close[agi] : double.NaN;
+            double oil    = wi  >= 0 ? sdWti4h!.Close[wi]  : double.NaN;
+            gsRatioRaw[i] = silver > 0 ? gold / silver : double.NaN;
+            goRatioRaw[i] = oil    > 0 ? gold / oil    : double.NaN;
+        }
+        int ratioZPeriod   = cfg.AdZScorePeriod > 0 ? cfg.AdZScorePeriod : 252;
+        double[] goldSilverZ = RollingZScore(gsRatioRaw, ratioZPeriod);
+        double[] goldOilZ    = RollingZScore(goRatioRaw, ratioZPeriod);
+
         // Pre-computed column indices for time + cross-asset
         int ciHourSin = colIndex["HourOfDay_Sin"], ciHourCos = colIndex["HourOfDay_Cos"];
         int ciDowSin  = colIndex["DayOfWeek_Sin"],  ciDowCos  = colIndex["DayOfWeek_Cos"];
@@ -279,8 +374,12 @@ public static class Transformer
 
         // Indicator indices used by cross-asset features
         int indLogReturn = 0; // always first
-        int indRsi = Array.IndexOf(indicatorNames, cfg.RsiPeriods.Contains(14) ? "RSI_14" : $"RSI_{cfg.RsiPeriods[0]}");
-        int indAtr = Array.IndexOf(indicatorNames, cfg.AtrPeriods.Contains(14) ? "ATR_14" : $"ATR_{cfg.AtrPeriods[0]}");
+        int indRsi = cfg.RsiPeriods.Length > 0
+            ? Array.IndexOf(indicatorNames, cfg.RsiPeriods.Contains(14) ? "RSI_14" : $"RSI_{cfg.RsiPeriods[0]}")
+            : -1;
+        int indAtr = cfg.AtrPeriods.Length > 0
+            ? Array.IndexOf(indicatorNames, cfg.AtrPeriods.Contains(14) ? "ATR_14" : $"ATR_{cfg.AtrPeriods[0]}")
+            : -1;
 
         // ── Main loop ─────────────────────────────────────────────────────────
 
@@ -345,9 +444,27 @@ public static class Transformer
 
             // ── Cross-asset features ──────────────────────────────────────────
             WriteCrossAsset(vals, T, longSd, shortSd,
-                xauAi, xagAi, wtiAi, tltAi, shyAi, spyAi, vixyAi, udnAi,
+                goldSilverZ[bi], goldOilZ[bi],
+                tltAi, shyAi, spyAi, vixyAi, udnAi,
                 base4hTi, tf1hShortTi, xaCols,
                 indLogReturn, indRsi, indAtr);
+
+            // ── Realized vol / vol ratio / vol scalar ─────────────────────────
+            if (cfg.RealizedVolPeriod > 0 &&
+                colIndex.TryGetValue($"{targetSafe}_RealizedVol_{cfg.RealizedVolPeriod}", out var rvColIdx))
+                vals[rvColIdx] = realizedVols[bi];
+
+            if (cfg.RealizedVolPeriod > 0 && cfg.VolRatioMaPeriod > 0 &&
+                colIndex.TryGetValue($"{targetSafe}_VolRatio_{cfg.RealizedVolPeriod}_{cfg.VolRatioMaPeriod}", out var vrColIdx))
+                vals[vrColIdx] = volRatios[bi];
+
+            double? volScalar = null;
+            if (cfg.RealizedVolPeriod > 0 && realizedVols[bi].HasValue)
+            {
+                volScalar = Math.Max(realizedVols[bi]!.Value, 1e-8);
+                if (colIndex.TryGetValue($"{targetSafe}_TargetVolScalar", out var vsColIdx))
+                    vals[vsColIdx] = volScalar;
+            }
 
             // ── Targets ───────────────────────────────────────────────────────
             bool hasTarget = false;
@@ -371,7 +488,15 @@ public static class Transformer
 
                     double cNow    = tsd.Close[curIdx];
                     double cFuture = tsd.Close[futureIdx];
-                    if (cNow > 0) vals[retColIdx] = Math.Log(cFuture / cNow);
+                    if (cNow > 0)
+                    {
+                        double rawReturn = Math.Log(cFuture / cNow);
+                        if (cfg.RealizedVolPeriod > 0 && volScalar.HasValue)
+                            vals[retColIdx] = rawReturn / volScalar.Value;
+                        else if (cfg.RealizedVolPeriod == 0)
+                            vals[retColIdx] = rawReturn;
+                        // else: vol warm-up not met — leave null so row is excluded from training
+                    }
                 }
             }
 
@@ -795,6 +920,7 @@ public static class Transformer
             }
 
             // ── SMA variants ─────────────────────────────────────────────────
+            var smaArrays = new List<double[]>(cfg.SmaPeriods.Length);
             foreach (var p in cfg.SmaPeriods)
             {
                 var map = PriceIndicators.Sma(dict, p);
@@ -802,15 +928,40 @@ public static class Transformer
                 for (int i = 0; i < n; i++)
                     arr[i] = map.TryGetValue(times[i], out var v) && close[i] != 0 ? (double)v / close[i] : double.NaN;
                 indList.Add(arr);
+                smaArrays.Add(arr);
             }
 
             // ── EMA variants ─────────────────────────────────────────────────
+            var emaArrays = new List<double[]>(cfg.EmaPeriods.Length);
             foreach (var p in cfg.EmaPeriods)
             {
                 var map = PriceIndicators.Ema(dict, p);
                 var arr = new double[n];
                 for (int i = 0; i < n; i++)
                     arr[i] = map.TryGetValue(times[i], out var v) && close[i] != 0 ? (double)v / close[i] : double.NaN;
+                indList.Add(arr);
+                emaArrays.Add(arr);
+            }
+
+            // ── SMASpread: consecutive period pairs (fast/slow ratio) ─────────
+            for (int k = 0; k + 1 < smaArrays.Count; k++)
+            {
+                var fast = smaArrays[k]; var slow = smaArrays[k + 1];
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = !double.IsNaN(fast[i]) && !double.IsNaN(slow[i]) && slow[i] != 0
+                        ? fast[i] / slow[i] : double.NaN;
+                indList.Add(arr);
+            }
+
+            // ── EMASpread: consecutive period pairs (fast/slow ratio) ─────────
+            for (int k = 0; k + 1 < emaArrays.Count; k++)
+            {
+                var fast = emaArrays[k]; var slow = emaArrays[k + 1];
+                var arr = new double[n];
+                for (int i = 0; i < n; i++)
+                    arr[i] = !double.IsNaN(fast[i]) && !double.IsNaN(slow[i]) && slow[i] != 0
+                        ? fast[i] / slow[i] : double.NaN;
                 indList.Add(arr);
             }
 
@@ -856,6 +1007,20 @@ public static class Transformer
                 indList.Add(arr);
             }
 
+            // ── ADX variants (ADX + +DI + -DI, normalised to [-1,1]) ──────────
+            foreach (var p in cfg.AdxPeriods)
+            {
+                var map = PriceIndicators.Adx(dict, p);
+                var adxArr = new double[n]; var plusArr = new double[n]; var minusArr = new double[n];
+                for (int i = 0; i < n; i++)
+                {
+                    if (map.TryGetValue(times[i], out var v))
+                    { adxArr[i] = (double)v.Adx / 50.0 - 1.0; plusArr[i] = (double)v.PlusDI / 50.0 - 1.0; minusArr[i] = (double)v.MinusDI / 50.0 - 1.0; }
+                    else adxArr[i] = plusArr[i] = minusArr[i] = double.NaN;
+                }
+                indList.Add(adxArr); indList.Add(plusArr); indList.Add(minusArr);
+            }
+
             // ── BB variants (Upper, Lower, Width per period) ──────────────────
             foreach (var p in cfg.BbPeriods)
             {
@@ -868,6 +1033,8 @@ public static class Transformer
                     else upper[i] = lower[i] = width[i] = double.NaN;
                 }
                 indList.Add(upper); indList.Add(lower); indList.Add(width);
+                if (cfg.BbWidthZPeriod > 0)
+                    indList.Add(RollingZScore(width, cfg.BbWidthZPeriod));
             }
 
             // ── CCI variants ──────────────────────────────────────────────────
@@ -905,6 +1072,7 @@ public static class Transformer
             }
 
             // ── MACD (single set) ─────────────────────────────────────────────
+            if (cfg.MacdFast > 0 && cfg.MacdSlow > 0 && cfg.MacdSignal > 0)
             {
                 var map = PriceIndicators.Macd(dict, cfg.MacdFast, cfg.MacdSlow, cfg.MacdSignal);
                 var lineArr = new double[n]; var sigArr = new double[n]; var histArr = new double[n];
@@ -918,6 +1086,7 @@ public static class Transformer
             }
 
             // ── Candle shape (normalized by first ATR period) ──────────────────
+            if (cfg.AtrPeriods.Length > 0)
             {
                 var crMap = PriceIndicators.CandleRange(dict);
                 var bsMap = PriceIndicators.BodySize(dict);
@@ -935,7 +1104,11 @@ public static class Transformer
                     lwArr[i] = lwMap.TryGetValue(times[i], out var lw) && !double.IsNaN(raw) && raw > 0 ? (double)lw * close[i] / raw : double.NaN;
                 }
                 indList.Add(crArr); indList.Add(bsArr); indList.Add(uwArr); indList.Add(lwArr);
+            }
 
+            // ── Distance from N-bar high / low ────────────────────────────────
+            if (cfg.DistN > 0)
+            {
                 var dhMap = PriceIndicators.DistanceFromHighN(dict, cfg.DistN);
                 var dlMap = PriceIndicators.DistanceFromLowN(dict, cfg.DistN);
                 var dhArr = new double[n]; var dlArr = new double[n];
@@ -948,6 +1121,7 @@ public static class Transformer
             }
 
             // ── AccumDist z-score + AccumDistOsc ──────────────────────────────
+            if (cfg.AdZScorePeriod > 0)
             {
                 var adRaw    = BuildIndicatorLookup(symInds, $"ad/{tf}");
                 var adoscRaw = BuildIndicatorLookup(symInds, $"adosc/{tf}");
@@ -1067,7 +1241,8 @@ public static class Transformer
     private static void WriteCrossAsset(
         double?[] vals, DateTime T,
         SeriesData?[][] longSd, SeriesData?[][] shortSd,
-        int xauAi, int xagAi, int wtiAi, int tltAi, int shyAi,
+        double goldSilverZ, double goldOilZ,
+        int tltAi, int shyAi,
         int spyAi, int vixyAi, int udnAi,
         int tf4hLongTi, int tf1hShortTi,
         int[] xaCols,
@@ -1092,14 +1267,11 @@ public static class Transformer
 
         void Set(int xaIdx, double v) { if (xaCols[xaIdx] >= 0 && !double.IsNaN(v)) vals[xaCols[xaIdx]] = v; }
 
-        double gold   = FloorClose(longSd, xauAi,  tf4hLongTi, T);
-        double silver = FloorClose(longSd, xagAi,  tf4hLongTi, T);
-        double oil    = FloorClose(longSd, wtiAi,  tf4hLongTi, T);
         double tlt    = FloorClose(longSd, tltAi,  tf4hLongTi, T);
         double shy    = FloorClose(longSd, shyAi,  tf4hLongTi, T);
 
-        Set(0, silver > 0 ? gold / silver : double.NaN);     // GoldSilverRatio
-        Set(1, oil    > 0 ? gold / oil    : double.NaN);     // GoldOilRatio
+        Set(0, goldSilverZ);     // GoldSilverRatio (z-scored)
+        Set(1, goldOilZ);        // GoldOilRatio    (z-scored)
 
         // DXY mom via UDN LogReturn — 1h short TF and 4h long TF
         Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, T, indLogReturn)); // DXY_Mom_1h
@@ -1126,17 +1298,29 @@ public static class Transformer
         names.Add("LogReturn");
         foreach (var p in cfg.SmaPeriods)       names.Add($"SMA_{p}");
         foreach (var p in cfg.EmaPeriods)       names.Add($"EMA_{p}");
+        for (int k = 0; k + 1 < cfg.SmaPeriods.Length; k++) names.Add($"SMASpread_{cfg.SmaPeriods[k]}_{cfg.SmaPeriods[k + 1]}");
+        for (int k = 0; k + 1 < cfg.EmaPeriods.Length; k++) names.Add($"EMASpread_{cfg.EmaPeriods[k]}_{cfg.EmaPeriods[k + 1]}");
         foreach (var p in cfg.RsiPeriods)       names.Add($"RSI_{p}");
         foreach (var p in cfg.RocPeriods)       names.Add($"ROC_{p}");
         foreach (var p in cfg.StdDevPeriods)    names.Add($"StdDev_{p}");
         foreach (var p in cfg.AtrPeriods)       names.Add($"ATR_{p}");
-        foreach (var p in cfg.BbPeriods)        { names.Add($"BbUpper_{p}"); names.Add($"BbLower_{p}"); names.Add($"BbWidth_{p}"); }
+        foreach (var p in cfg.AdxPeriods)       { names.Add($"ADX_{p}"); names.Add($"PlusDI_{p}"); names.Add($"MinusDI_{p}"); }
+        foreach (var p in cfg.BbPeriods)
+        {
+            names.Add($"BbUpper_{p}"); names.Add($"BbLower_{p}"); names.Add($"BbWidth_{p}");
+            if (cfg.BbWidthZPeriod > 0) names.Add($"BbWidthZ_{p}");
+        }
         foreach (var p in cfg.CciPeriods)       names.Add($"CCI_{p}");
         foreach (var p in cfg.WilliamsRPeriods) names.Add($"WilliamsR_{p}");
         foreach (var p in cfg.StochKPeriods)    { names.Add($"StochK_{p}"); names.Add($"StochD_{p}"); }
-        names.Add("MacdLine"); names.Add("MacdSignal"); names.Add("MacdHist");
-        names.Add("CandleRange"); names.Add("BodySize"); names.Add("UpperWick"); names.Add("LowerWick");
-        names.Add("DistHigh"); names.Add("DistLow"); names.Add("AccumDist"); names.Add("AccumDistOsc");
+        if (cfg.MacdFast > 0 && cfg.MacdSlow > 0 && cfg.MacdSignal > 0)
+            { names.Add("MacdLine"); names.Add("MacdSignal"); names.Add("MacdHist"); }
+        if (cfg.AtrPeriods.Length > 0)
+            { names.Add("CandleRange"); names.Add("BodySize"); names.Add("UpperWick"); names.Add("LowerWick"); }
+        if (cfg.DistN > 0)
+            { names.Add("DistHigh"); names.Add("DistLow"); }
+        if (cfg.AdZScorePeriod > 0)
+            { names.Add("AccumDist"); names.Add("AccumDistOsc"); }
         return names.ToArray();
     }
 

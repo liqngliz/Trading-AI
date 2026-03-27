@@ -15,6 +15,8 @@ public readonly record struct BollingerValue(
 
 public readonly record struct StochasticValue(decimal K, decimal D);
 
+public readonly record struct AdxValue(decimal Adx, decimal PlusDI, decimal MinusDI);
+
 // ── Indicator computations ────────────────────────────────────────────────────
 
 public static class PriceIndicators
@@ -401,6 +403,72 @@ public static class PriceIndicators
             for (var j = i - period + 2; j <= i; j++)
                 if (c[j].High > high) high = c[j].High;
             result[c[i].Datetime] = high == 0 ? 0m : c[i].Close / high - 1m;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Average Directional Index with +DI and -DI.
+    /// Warmup = 2 × period bars. Values normalised to [0, 100].
+    /// </summary>
+    public static Dictionary<DateTime, AdxValue> Adx(
+        IReadOnlyDictionary<DateTime, TimeSeriesValue> series,
+        int period = 14,
+        bool skipFilled = true)
+    {
+        var c = Ordered(series, skipFilled);
+        var result = new Dictionary<DateTime, AdxValue>(c.Count);
+
+        decimal smTr = 0, smPlusDm = 0, smMinusDm = 0;
+        decimal smAdx = 0, dxSum = 0;
+
+        for (int i = 1; i < c.Count; i++)
+        {
+            var tr       = Math.Max(c[i].High - c[i].Low,
+                           Math.Max(Math.Abs(c[i].High - c[i - 1].Close),
+                                    Math.Abs(c[i].Low  - c[i - 1].Close)));
+            var upMove   = c[i].High - c[i - 1].High;
+            var downMove = c[i - 1].Low - c[i].Low;
+            var plusDm   = upMove > 0 && upMove >= downMove ? upMove : 0m;
+            var minusDm  = downMove > 0 && downMove > upMove ? downMove : 0m;
+
+            if (i <= period)
+            {
+                // Seed phase: accumulate raw sums
+                smTr += tr; smPlusDm += plusDm; smMinusDm += minusDm;
+                if (i < period) continue;
+                // i == period: first smoothed values are the sums; fall through to DI/DX
+            }
+            else
+            {
+                // Wilder smoothing: s = s − s/N + new
+                smTr      = smTr      - smTr / period      + tr;
+                smPlusDm  = smPlusDm  - smPlusDm / period  + plusDm;
+                smMinusDm = smMinusDm - smMinusDm / period + minusDm;
+            }
+
+            if (smTr == 0) continue;
+            var plusDI  = 100m * smPlusDm  / smTr;
+            var minusDI = 100m * smMinusDm / smTr;
+            var diSum   = plusDI + minusDI;
+            var dx      = diSum == 0 ? 0m : 100m * Math.Abs(plusDI - minusDI) / diSum;
+
+            // Seed ADX with average of first `period` DX values, then Wilder smooth
+            int dxBar = i - period;   // 0-based index into DX series
+            if (dxBar < period - 1)
+            {
+                dxSum += dx;
+            }
+            else if (dxBar == period - 1)
+            {
+                smAdx = (dxSum + dx) / period;
+                result[c[i].Datetime] = new AdxValue(smAdx, plusDI, minusDI);
+            }
+            else
+            {
+                smAdx = (smAdx * (period - 1) + dx) / period;
+                result[c[i].Datetime] = new AdxValue(smAdx, plusDI, minusDI);
+            }
         }
         return result;
     }

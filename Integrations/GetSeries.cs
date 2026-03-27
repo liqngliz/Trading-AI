@@ -30,10 +30,24 @@ public static class TwelveDataSeries
             cache.Intervals[param.Interval] = intervalBucket;
         }
 
-        var expectedTimestamps = buildExpectedTimestamps(param.StartDate, param.EndDate, param.Interval);
-        Console.WriteLine($"Expected timestamps count: {expectedTimestamps.Count}");
-        Console.WriteLine($"Cached timestamps count: {intervalBucket.Count}");
-        Console.WriteLine($"Expected last: {expectedTimestamps.LastOrDefault()}");
+        // Compute effective fetch start from the latest real (non-filled) cached entry so
+        // that re-runs only fetch bars that aren't already in the cache.
+        var step = TwelveDataParamExtensions.ParseInterval(param.Interval);
+        var effectiveStart = param.StartDate;
+        foreach (var kv in intervalBucket)
+            if (!kv.Value.IsFilled) effectiveStart = kv.Value.Datetime.Add(step);
+
+        Console.WriteLine($"Cached: {intervalBucket.Count} entries. Fetching from {effectiveStart:yyyy-MM-dd HH:mm:ss}");
+
+        if (effectiveStart > param.EndDate)
+        {
+            Console.WriteLine("Cache is up to date.");
+            return intervalBucket
+                .Where(x => { var dt = parseStorageKey(x.Key); return dt >= param.StartDate && dt <= param.EndDate; })
+                .ToDictionary(x => parseStorageKey(x.Key), x => x.Value);
+        }
+
+        var expectedTimestamps = buildExpectedTimestamps(effectiveStart, param.EndDate, param.Interval);
         var missingRanges = buildMissingRanges(expectedTimestamps, intervalBucket);
 
         foreach (var missingRange in missingRanges)
@@ -181,41 +195,33 @@ public static class TwelveDataSeries
         if (expectedTimestamps.Count == 0)
             return 0;
 
-        var existingValues = expectedTimestamps
-            .Select((timestamp, index) =>
-            {
-                var hasValue = intervalBucket.TryGetValue(TwelveDataParamExtensions.ToStorageKey(timestamp), out var value);
-                return new { Timestamp = timestamp, Index = index, HasValue = hasValue, Value = value };
-            })
-            .Where(x => x.HasValue)
-            .ToList();
-
-        if (existingValues.Count == 0)
-            return 0;
-
-        var firstExisting = existingValues[0];
-        var filledCount = 0;
-
-        for (var i = 0; i < firstExisting.Index; i++)
+        // Seed from the latest real (non-filled) entry at or before the first expected
+        // timestamp. Using expected-grid keys as the seed fails when API timestamps don't
+        // align with the uniform grid (e.g. ETFs with exchange-hours offsets).
+        // SortedDictionary iterates in ascending key order = chronological order.
+        var firstExpectedKey = TwelveDataParamExtensions.ToStorageKey(expectedTimestamps[0]);
+        TimeSeriesValue? seed = null;
+        foreach (var kv in intervalBucket)
         {
-            var timestamp = expectedTimestamps[i];
-            intervalBucket[TwelveDataParamExtensions.ToStorageKey(timestamp)] = CreateFilledValue(timestamp, firstExisting.Value);
-            filledCount++;
+            if (kv.Value.IsFilled) continue;
+            if (string.Compare(kv.Key, firstExpectedKey, StringComparison.Ordinal) > 0) break;
+            seed = kv.Value; // each non-filled entry before firstExpected overwrites → last = latest
         }
 
-        var lastKnown = firstExisting.Value;
+        if (seed is null)
+            return 0;
 
-        for (var i = firstExisting.Index + 1; i < expectedTimestamps.Count; i++)
+        var lastKnown = seed.Value;
+        var filledCount = 0;
+
+        foreach (var timestamp in expectedTimestamps)
         {
-            var timestamp = expectedTimestamps[i];
             var storageKey = TwelveDataParamExtensions.ToStorageKey(timestamp);
-
-            if (intervalBucket.TryGetValue(storageKey, out var existingValue))
+            if (intervalBucket.TryGetValue(storageKey, out var existing) && !existing.IsFilled)
             {
-                lastKnown = existingValue;
+                lastKnown = existing;
                 continue;
             }
-
             intervalBucket[storageKey] = CreateFilledValue(timestamp, lastKnown);
             filledCount++;
         }

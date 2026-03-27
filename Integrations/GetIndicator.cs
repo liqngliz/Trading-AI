@@ -58,7 +58,23 @@ public static class TwelveDataIndicator
             cache.Data[bucketKey] = bucket;
         }
 
-        var expectedTimestamps = buildExpectedTimestamps(param.StartDate, param.EndDate, param.Interval);
+        // Compute effective fetch start from the latest real cached entry.
+        var step = TwelveDataParamExtensions.ParseInterval(param.Interval);
+        var effectiveStart = param.StartDate;
+        foreach (var kv in bucket)
+            if (!kv.Value.IsFilled) effectiveStart = kv.Value.Datetime.Add(step);
+
+        Console.WriteLine($"  [GetIndicator] {param.Symbol}/{bucketKey}: {bucket.Count} cached. Fetching from {effectiveStart:yyyy-MM-dd HH:mm:ss}");
+
+        if (effectiveStart > param.EndDate)
+        {
+            Console.WriteLine($"  [GetIndicator] {param.Symbol}/{bucketKey}: cache is up to date.");
+            return bucket
+                .Where(x => { var dt = parseStorageKey(x.Key); return dt >= param.StartDate && dt <= param.EndDate; })
+                .ToDictionary(x => parseStorageKey(x.Key), x => x.Value);
+        }
+
+        var expectedTimestamps = buildExpectedTimestamps(effectiveStart, param.EndDate, param.Interval);
         var missingRanges = buildMissingRanges(expectedTimestamps, bucket);
 
         foreach (var missingRange in missingRanges)
@@ -212,25 +228,31 @@ public static class TwelveDataIndicator
         if (expectedTimestamps.Count == 0)
             return 0;
 
-        // Find seed: earliest real (non-filled) entry in the bucket, regardless of expectedTimestamp alignment.
-        // Bucket is sorted by key (= sorted chronologically via "yyyy-MM-dd HH:mm:ss" format).
-        var seedEntry = bucket.FirstOrDefault(x => !x.Value.IsFilled);
-        if (seedEntry.Key is null)
+        // Seed from the latest real (non-filled) entry at or before the first expected
+        // timestamp so carry-forward uses the most recent known value, not the oldest.
+        var firstExpectedKey = TwelveDataParamExtensions.ToStorageKey(expectedTimestamps[0]);
+        decimal? seed = null;
+        foreach (var kv in bucket)
+        {
+            if (kv.Value.IsFilled) continue;
+            if (string.Compare(kv.Key, firstExpectedKey, StringComparison.Ordinal) > 0) break;
+            seed = kv.Value.Value;
+        }
+
+        if (seed is null)
             return 0;
 
-        var lastKnownValue = seedEntry.Value.Value;
+        var lastKnownValue = seed.Value;
         var filledCount = 0;
 
         foreach (var timestamp in expectedTimestamps)
         {
             var storageKey = TwelveDataParamExtensions.ToStorageKey(timestamp);
-
             if (bucket.TryGetValue(storageKey, out var existing) && !existing.IsFilled)
             {
                 lastKnownValue = existing.Value;
                 continue;
             }
-
             bucket[storageKey] = new IndicatorValue(timestamp, lastKnownValue, IsFilled: true);
             filledCount++;
         }
