@@ -184,7 +184,7 @@ public static class TwelveDataParamExtensions
         return ranges;
     }
 
-    internal static TimeSpan ParseInterval(string interval)
+    public static TimeSpan ParseInterval(string interval)
     {
         return interval switch
         {

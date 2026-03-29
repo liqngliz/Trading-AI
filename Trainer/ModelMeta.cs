@@ -1,4 +1,4 @@
-namespace Predictor;
+namespace Trainer;
 
 /// <summary>
 /// Sidecar metadata saved alongside each trained model (.features.json).

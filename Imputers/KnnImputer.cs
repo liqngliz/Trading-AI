@@ -1,4 +1,4 @@
-namespace Predictor;
+namespace Imputers;
 
 /// <summary>
 /// K-nearest-neighbour multivariate imputer.

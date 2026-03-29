@@ -32,8 +32,17 @@ public sealed class DatasetConfig
     "VIXY", "UDN", "UUP"
     ];
 
-    public static readonly string[] ShortTimeframes = ["15min", "30min", "1h"];
-    public static readonly string[] LongTimeframes   = ["4h", "1day", "1week"];
+    public static readonly string[] AllShortTimeframes = ["15min", "30min", "1h"];
+    public static readonly string[] AllLongTimeframes  = ["4h", "1day", "1week"];
+
+    /// <summary>Short timeframes included for this dataset build. Set to [] to skip short-TF features.</summary>
+    public string[] ShortTimeframes { get; init; } = ["30min", "1h"];
+    /// <summary>Long timeframes included for this dataset build.</summary>
+    public string[] LongTimeframes  { get; init; } = ["4h", "1day", "1week"];
+    /// <summary>Timeframe that drives row generation (base series). Must be in LongTimeframes.</summary>
+    public string   BaseTimeframe   { get; init; } = "4h";
+    /// <summary>Base file name used for CSV output (e.g. "xauusd_4h").</summary>
+    public string   BaseName        { get; init; } = "xauusd_4h";
 
     /// <summary>Symbol to predict. Must exist in <see cref="AllAssets"/>.</summary>
     public string TargetSymbol { get; init; } = "XAU/USD";
@@ -66,6 +75,13 @@ public sealed class DatasetConfig
     public int DistN              { get; init; } = 20;
     public int AdZScorePeriod     { get; init; } = 252;
 
+    /// <summary>
+    /// How far before T to cut off all feature lookups. Features see data up to T − FeatureLag.
+    /// Default is zero (features include bar T's own close, i.e. current bar).
+    /// Set to e.g. TimeSpan.FromHours(4) to stop at T−1 on a 4h base series.
+    /// </summary>
+    public TimeSpan FeatureLag    { get; init; } = TimeSpan.Zero;
+
     /// <summary>Window (bars) for rolling std of log-returns on target symbol 4h series. 0 = disabled.</summary>
     public int RealizedVolPeriod  { get; init; } = 20;
     /// <summary>Window (bars) for rolling mean of realized vol used in the vol ratio. 0 = disabled.</summary>
@@ -83,6 +99,15 @@ public sealed class DatasetConfig
     public DateTime? TrainingStartDate { get; init; }
 
     public string OutputDirectory { get; init; } = "Dataset";
+
+    /// <summary>Max NaN fraction for a column to be retained. Columns with higher NaN rate are pruned.</summary>
+    public double SparseColThreshold { get; init; } = 0.7;
+
+    /// <summary>Substrings to prune from feature columns (case-sensitive). Empty = no keyword pruning.</summary>
+    public string[] PruneKeywords { get; init; } = ["_min", "_max", "_mean"];
+
+    /// <summary>If a column name contains any of these substrings, keyword pruning is skipped for it.</summary>
+    public string[] PruneExcludeKeywords { get; init; } = ["Bb", "RSI", "Stoch"];
 }
 
 // ── Row ───────────────────────────────────────────────────────────────────────
@@ -152,21 +177,21 @@ public static class Transformer
         var longSd  = new SeriesData?[DatasetConfig.AllAssets.Length][];
         for (int ai = 0; ai < DatasetConfig.AllAssets.Length; ai++)
         {
-            shortSd[ai] = new SeriesData?[DatasetConfig.ShortTimeframes.Length];
-            longSd[ai]  = new SeriesData?[DatasetConfig.LongTimeframes.Length];
+            shortSd[ai] = new SeriesData?[cfg.ShortTimeframes.Length];
+            longSd[ai]  = new SeriesData?[cfg.LongTimeframes.Length];
             var sym = DatasetConfig.AllAssets[ai];
             if (!allCandles.TryGetValue(sym, out var symCandles)) continue;
             allIndicators.TryGetValue(sym, out var symInds);
 
-            for (int ti = 0; ti < DatasetConfig.ShortTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.ShortTimeframes.Length; ti++)
             {
-                var tf = DatasetConfig.ShortTimeframes[ti];
+                var tf = cfg.ShortTimeframes[ti];
                 if (symCandles.TryGetValue(tf, out var c) && c.Count > 0)
                     shortSd[ai][ti] = BuildSeriesData(sym, tf, c, symInds, cfg);
             }
-            for (int ti = 0; ti < DatasetConfig.LongTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.LongTimeframes.Length; ti++)
             {
-                var tf = DatasetConfig.LongTimeframes[ti];
+                var tf = cfg.LongTimeframes[ti];
                 if (symCandles.TryGetValue(tf, out var c) && c.Count > 0)
                     longSd[ai][ti] = BuildSeriesData(sym, tf, c, symInds, cfg);
             }
@@ -189,19 +214,19 @@ public static class Transformer
         for (int ai = 0; ai < DatasetConfig.AllAssets.Length; ai++)
         {
             var safe = SafeSymbol(DatasetConfig.AllAssets[ai]);
-            for (int ti = 0; ti < DatasetConfig.ShortTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.ShortTimeframes.Length; ti++)
             {
                 if (shortSd[ai][ti] == null) continue;
-                var tf = DatasetConfig.ShortTimeframes[ti];
+                var tf = cfg.ShortTimeframes[ti];
                 foreach (var ind in indicatorNames)
                     foreach (var stat in cfg.AggStats)
                         AddCol($"{safe}_{tf}_{ind}_{stat}");
             }
             AddCol($"{safe}_Missing");
-            for (int ti = 0; ti < DatasetConfig.LongTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.LongTimeframes.Length; ti++)
             {
                 if (longSd[ai][ti] == null) continue;
-                var tf = DatasetConfig.LongTimeframes[ti];
+                var tf = cfg.LongTimeframes[ti];
                 foreach (var ind in indicatorNames)
                     AddCol($"{safe}_{tf}_{ind}");
             }
@@ -225,12 +250,12 @@ public static class Transformer
         var shortIdx = new int[DatasetConfig.AllAssets.Length][][][];
         for (int ai = 0; ai < DatasetConfig.AllAssets.Length; ai++)
         {
-            shortIdx[ai] = new int[DatasetConfig.ShortTimeframes.Length][][];
+            shortIdx[ai] = new int[cfg.ShortTimeframes.Length][][];
             var safe = SafeSymbol(DatasetConfig.AllAssets[ai]);
-            for (int ti = 0; ti < DatasetConfig.ShortTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.ShortTimeframes.Length; ti++)
             {
                 shortIdx[ai][ti] = new int[nInds][];
-                var tf = DatasetConfig.ShortTimeframes[ti];
+                var tf = cfg.ShortTimeframes[ti];
                 for (int ii = 0; ii < nInds; ii++)
                 {
                     shortIdx[ai][ti][ii] = new int[nStats];
@@ -247,12 +272,12 @@ public static class Transformer
         var longIdx = new int[DatasetConfig.AllAssets.Length][][];
         for (int ai = 0; ai < DatasetConfig.AllAssets.Length; ai++)
         {
-            longIdx[ai] = new int[DatasetConfig.LongTimeframes.Length][];
+            longIdx[ai] = new int[cfg.LongTimeframes.Length][];
             var safe = SafeSymbol(DatasetConfig.AllAssets[ai]);
-            for (int ti = 0; ti < DatasetConfig.LongTimeframes.Length; ti++)
+            for (int ti = 0; ti < cfg.LongTimeframes.Length; ti++)
             {
                 longIdx[ai][ti] = new int[nInds];
-                var tf = DatasetConfig.LongTimeframes[ti];
+                var tf = cfg.LongTimeframes[ti];
                 for (int ii = 0; ii < nInds; ii++)
                 {
                     var key = $"{safe}_{tf}_{indicatorNames[ii]}";
@@ -269,17 +294,24 @@ public static class Transformer
             missingIdx[ai] = colIndex.TryGetValue(key, out var ci) ? ci : -1;
         }
 
+        // Step sizes for each long TF — used to offset cutoff so only fully-closed bars are selected.
+        // Timestamp = bar open time, so bar at t closes at t+step. To avoid using a bar whose close
+        // is in the future, we look up BsFloor(cutoff - step) instead of BsFloor(cutoff).
+        var longTfSteps = cfg.LongTimeframes
+            .Select(TwelveDataParamExtensions.ParseInterval)
+            .ToArray();
+
         // Target asset index
         int targetAi = Array.IndexOf(DatasetConfig.AllAssets, cfg.TargetSymbol);
 
         // ── Locate 4h base bars for target asset ──────────────────────────────
 
-        int base4hTi = Array.IndexOf(DatasetConfig.LongTimeframes, "4h");
+        int base4hTi = Array.IndexOf(cfg.LongTimeframes, cfg.BaseTimeframe);
         var baseSd   = targetAi >= 0 && base4hTi >= 0 ? longSd[targetAi][base4hTi] : null;
 
         if (baseSd == null || baseSd.Times.Length == 0)
         {
-            Console.WriteLine($"[BuildFeatureMatrix] No 4h data for {cfg.TargetSymbol}. Aborting.");
+            Console.WriteLine($"[BuildFeatureMatrix] No {cfg.BaseTimeframe} data for {cfg.TargetSymbol}. Aborting.");
             return ([], columns.ToArray(), []);
         }
 
@@ -337,7 +369,7 @@ public static class Transformer
         int spyAi  = Array.IndexOf(DatasetConfig.AllAssets, "SPY");
         int vixyAi = Array.IndexOf(DatasetConfig.AllAssets, "VIXY");
         int udnAi  = Array.IndexOf(DatasetConfig.AllAssets, "UDN");
-        int tf1hShortTi = Array.IndexOf(DatasetConfig.ShortTimeframes, "1h");
+        int tf1hShortTi = Array.IndexOf(cfg.ShortTimeframes, "1h");
         // cross-asset DXY mom uses 1h short and 4h long UDN
 
         // ── Pre-compute cross-asset ratio z-scores ────────────────────────────
@@ -392,10 +424,12 @@ public static class Transformer
 
         for (int bi = 0; bi < baseSd.Times.Length; bi++)
         {
-            var T = baseSd.Times[bi];
+            var T      = baseSd.Times[bi];
+            var cutoff = T - cfg.FeatureLag;        // features see data up to (and including) cutoff
+            int cutoffBi = BsFloor(baseSd.Times, cutoff); // index in base series at cutoff (== bi when lag=0)
             if (cfg.TrainingStartDate.HasValue && T < cfg.TrainingStartDate.Value) continue;
 
-            var windowStart = T.AddHours(-4);
+            var windowStart = cutoff.AddHours(-4);  // short-TF aggregation window: (cutoff-4h, cutoff]
             var vals        = new double?[nCols];
 
             // ── Time encodings ────────────────────────────────────────────────
@@ -413,12 +447,12 @@ public static class Transformer
                 bool hasMissing = false;
 
                 // Short TF aggregation
-                for (int ti = 0; ti < DatasetConfig.ShortTimeframes.Length; ti++)
+                for (int ti = 0; ti < cfg.ShortTimeframes.Length; ti++)
                 {
                     var sd = shortSd[ai][ti];
                     if (sd == null) { hasMissing = true; continue; }
 
-                    int hi = BsFloor(sd.Times, T);
+                    int hi = BsFloor(sd.Times, cutoff);
                     if (hi < 0) { hasMissing = true; continue; }
 
                     // Advance lo to first bar >= windowStart
@@ -431,37 +465,44 @@ public static class Transformer
 
                 if (missingIdx[ai] >= 0) vals[missingIdx[ai]] = hasMissing ? 1.0 : 0.0;
 
-                // Long TF single bar
-                for (int ti = 0; ti < DatasetConfig.LongTimeframes.Length; ti++)
+                // Long TF single bar — use cutoff - step so only fully-closed bars are selected.
+                // Timestamp = open time; bar closes at open + step, so BsFloor(cutoff) may return
+                // a bar whose close is after cutoff (future). BsFloor(cutoff - step) guarantees
+                // the returned bar's close ≤ cutoff.
+                for (int ti = 0; ti < cfg.LongTimeframes.Length; ti++)
                 {
                     var sd = longSd[ai][ti];
                     if (sd == null) continue;
-                    int i = BsFloor(sd.Times, T);
+                    int i = BsFloor(sd.Times, cutoff - longTfSteps[ti]);
                     if (i < 0) continue;
                     WriteLong(vals, sd, i, longIdx[ai][ti], nInds);
                 }
             }
 
             // ── Cross-asset features ──────────────────────────────────────────
-            WriteCrossAsset(vals, T, longSd, shortSd,
-                goldSilverZ[bi], goldOilZ[bi],
+            WriteCrossAsset(vals, cutoff, longSd, shortSd,
+                cutoffBi >= 0 ? goldSilverZ[cutoffBi] : double.NaN,
+                cutoffBi >= 0 ? goldOilZ[cutoffBi]    : double.NaN,
                 tltAi, shyAi, spyAi, vixyAi, udnAi,
                 base4hTi, tf1hShortTi, xaCols,
                 indLogReturn, indRsi, indAtr);
 
             // ── Realized vol / vol ratio / vol scalar ─────────────────────────
+            var rvAtCutoff = cutoffBi >= 0 ? realizedVols[cutoffBi] : null;
+            var vrAtCutoff = cutoffBi >= 0 ? volRatios[cutoffBi]    : null;
+
             if (cfg.RealizedVolPeriod > 0 &&
                 colIndex.TryGetValue($"{targetSafe}_RealizedVol_{cfg.RealizedVolPeriod}", out var rvColIdx))
-                vals[rvColIdx] = realizedVols[bi];
+                vals[rvColIdx] = rvAtCutoff;
 
             if (cfg.RealizedVolPeriod > 0 && cfg.VolRatioMaPeriod > 0 &&
                 colIndex.TryGetValue($"{targetSafe}_VolRatio_{cfg.RealizedVolPeriod}_{cfg.VolRatioMaPeriod}", out var vrColIdx))
-                vals[vrColIdx] = volRatios[bi];
+                vals[vrColIdx] = vrAtCutoff;
 
             double? volScalar = null;
-            if (cfg.RealizedVolPeriod > 0 && realizedVols[bi].HasValue)
+            if (cfg.RealizedVolPeriod > 0 && rvAtCutoff.HasValue)
             {
-                volScalar = Math.Max(realizedVols[bi]!.Value, 1e-8);
+                volScalar = Math.Max(rvAtCutoff!.Value, 1e-8);
                 if (colIndex.TryGetValue($"{targetSafe}_TargetVolScalar", out var vsColIdx))
                     vals[vsColIdx] = volScalar;
             }
@@ -477,7 +518,7 @@ public static class Transformer
                     var retColKey = $"{targetSafe}_Target_{tf}_Return";
                     if (!colIndex.TryGetValue(retColKey, out var retColIdx)) continue;
 
-                    int tfTi = Array.IndexOf(DatasetConfig.LongTimeframes, tf);
+                    int tfTi = Array.IndexOf(cfg.LongTimeframes, tf);
                     if (tfTi < 0 || targetAi < 0) continue;
                     var tsd = longSd[targetAi][tfTi];
                     if (tsd == null) continue;
@@ -585,6 +626,67 @@ public static class Transformer
 
         Console.WriteLine($"[PruneSparseCols] Removed {removedCols.Count} columns (>{threshold:P0} null or null+zero) → {reportPath}");
         return (newRows, newColumns);
+    }
+
+    /// <summary>
+    /// Removes feature columns whose name contains any of the given <paramref name="keywords"/>,
+    /// unless the column also contains any of the <paramref name="excludeKeywords"/> — in which
+    /// case all agg stats for that indicator are kept in full.
+    /// Timestamp and target columns are always kept.
+    /// </summary>
+    public static (List<DatasetRow> Rows, string[] Columns) PruneByKeyword(
+        List<DatasetRow> rows,
+        string[]         columns,
+        string[]         keywords,
+        string[]         excludeKeywords = null!,
+        string?          reportPath      = null)
+    {
+        if (rows.Count == 0 || keywords.Length == 0) return (rows, columns);
+
+        excludeKeywords ??= [];
+
+        var keepCols    = new List<string>();
+        var removedCols = new List<string>();
+
+        foreach (var col in columns)
+        {
+            bool isProtected = col == "Timestamp" || col.Contains("_Target_");
+            bool isExcluded  = excludeKeywords.Any(e => col.Contains(e, StringComparison.Ordinal));
+            bool hasKeyword  = !isProtected && !isExcluded
+                               && keywords.Any(k => col.Contains(k, StringComparison.Ordinal));
+
+            if (hasKeyword)
+                removedCols.Add(col);
+            else
+                keepCols.Add(col);
+        }
+
+        if (removedCols.Count == 0)
+        {
+            Console.WriteLine("[PruneByKeyword] No columns matched the keywords.");
+            return (rows, columns);
+        }
+
+        var keepSet = keepCols.ToHashSet();
+        var newRows = rows.Select(row => new DatasetRow
+        {
+            Timestamp = row.Timestamp,
+            Values    = row.Values
+                .Where(kv => keepSet.Contains(kv.Key))
+                .ToDictionary(kv => kv.Key, kv => kv.Value)
+        }).ToList();
+
+        if (reportPath != null)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(reportPath) ?? ".");
+            File.WriteAllLines(reportPath, removedCols);
+        }
+
+        var excludeNote = excludeKeywords.Length > 0
+            ? $" (excluding [{string.Join(", ", excludeKeywords)}])"
+            : "";
+        Console.WriteLine($"[PruneByKeyword] Removed {removedCols.Count} columns matching [{string.Join(", ", keywords)}]{excludeNote}.");
+        return (newRows, keepCols.ToArray());
     }
 
     /// <summary>
@@ -722,6 +824,62 @@ public static class Transformer
                 $"Val {valRows.Count} rows " +
                 $"({rows[valStart].Timestamp:yyyy-MM-dd}→{rows[valEnd].Timestamp:yyyy-MM-dd})");
         }
+    }
+
+    /// <summary>
+    /// Splits the dataset into two CSV files by per-row feature NaN rate:
+    ///   nan_0_66   → ≤ 66% NaN
+    ///   nan_66_100 → &gt; 66% NaN
+    /// NaN rate is computed over feature columns only (excludes Timestamp and *_Target_* columns).
+    /// Files are written to <paramref name="outputDirectory"/> using the base name
+    /// derived from <paramref name="baseName"/> (e.g. "xauusd_4h_dataset").
+    /// </summary>
+    public static void SplitByNanBucket(
+        List<DatasetRow> rows,
+        string[]         columns,
+        string           outputDirectory,
+        string           baseName = "xauusd_4h_dataset")
+    {
+        if (rows.Count == 0) return;
+        Directory.CreateDirectory(outputDirectory);
+
+        // Feature columns: all except Timestamp and target columns
+        var featureCols = columns
+            .Where(c => c != "Timestamp" && !c.Contains("_Target_"))
+            .ToArray();
+        int nFeatures = featureCols.Length;
+
+        if (nFeatures == 0)
+        {
+            Console.WriteLine("[SplitByNanBucket] No feature columns found, skipping.");
+            return;
+        }
+
+        // Bucket rows
+        var buckets = new List<DatasetRow>[2];
+        for (int b = 0; b < 2; b++) buckets[b] = [];
+
+        foreach (var row in rows)
+        {
+            int nanCount = featureCols.Count(c =>
+                !row.Values.TryGetValue(c, out var v) || !v.HasValue);
+            double nanPct = (double)nanCount / nFeatures;
+
+            int bucket = nanPct <= 0.66 ? 0 : 1;
+            buckets[bucket].Add(row);
+        }
+
+        string[] names  = ["nan_0_66", "nan_66_100"];
+        string[] labels = ["≤66% NaN", ">66% NaN"];
+
+        for (int b = 0; b < 2; b++)
+        {
+            var path = Path.Combine(outputDirectory, $"{baseName}_{names[b]}.csv");
+            ExportToCsv(buckets[b], columns, path);
+            Console.WriteLine($"  Bucket {labels[b]}: {buckets[b].Count} rows → {Path.GetFileName(path)}");
+        }
+
+        Console.WriteLine($"[SplitByNanBucket] Total {rows.Count} rows split into {nFeatures} feature-column NaN buckets.");
     }
 
     /// <summary>
@@ -1239,7 +1397,7 @@ public static class Transformer
     }
 
     private static void WriteCrossAsset(
-        double?[] vals, DateTime T,
+        double?[] vals, DateTime cutoff,
         SeriesData?[][] longSd, SeriesData?[][] shortSd,
         double goldSilverZ, double goldOilZ,
         int tltAi, int shyAi,
@@ -1267,25 +1425,25 @@ public static class Transformer
 
         void Set(int xaIdx, double v) { if (xaCols[xaIdx] >= 0 && !double.IsNaN(v)) vals[xaCols[xaIdx]] = v; }
 
-        double tlt    = FloorClose(longSd, tltAi,  tf4hLongTi, T);
-        double shy    = FloorClose(longSd, shyAi,  tf4hLongTi, T);
+        double tlt    = FloorClose(longSd, tltAi,  tf4hLongTi, cutoff);
+        double shy    = FloorClose(longSd, shyAi,  tf4hLongTi, cutoff);
 
         Set(0, goldSilverZ);     // GoldSilverRatio (z-scored)
         Set(1, goldOilZ);        // GoldOilRatio    (z-scored)
 
         // DXY mom via UDN LogReturn — 1h short TF and 4h long TF
-        Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, T, indLogReturn)); // DXY_Mom_1h
-        Set(3, FloorInd(longSd,  udnAi, tf4hLongTi,  T, indLogReturn)); // DXY_Mom_4h
+        Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, cutoff, indLogReturn)); // DXY_Mom_1h
+        Set(3, FloorInd(longSd,  udnAi, tf4hLongTi,  cutoff, indLogReturn)); // DXY_Mom_4h
 
         Set(4, shy > 0 ? tlt / shy : double.NaN);            // YieldCurveProxy
 
         // RiskSentiment: SPY RSI - VIXY RSI
-        double spyRsi  = FloorInd(longSd, spyAi,  tf4hLongTi, T, indRsi);
-        double vixyRsi = FloorInd(longSd, vixyAi, tf4hLongTi, T, indRsi);
+        double spyRsi  = FloorInd(longSd, spyAi,  tf4hLongTi, cutoff, indRsi);
+        double vixyRsi = FloorInd(longSd, vixyAi, tf4hLongTi, cutoff, indRsi);
         Set(5, !double.IsNaN(spyRsi) && !double.IsNaN(vixyRsi) ? spyRsi - vixyRsi : double.NaN);
 
         // VolatilityRegime: VIXY ATR/close bucketed into 0/1/2
-        double vixyAtr = FloorInd(longSd, vixyAi, tf4hLongTi, T, indAtr);
+        double vixyAtr = FloorInd(longSd, vixyAi, tf4hLongTi, cutoff, indAtr);
         if (!double.IsNaN(vixyAtr))
             Set(6, vixyAtr < 0.02 ? 0.0 : vixyAtr < 0.05 ? 1.0 : 2.0);
     }

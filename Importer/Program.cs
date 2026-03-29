@@ -110,10 +110,10 @@ string[] symbols =
     // Precious metals
     "XAU/USD", "XAG/USD", "XPT/USD", "XPD/USD",
     // Forex
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH",
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF", "USD/CNH", "USD/CNY", 
     // ETFs
     // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
-    "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "QQQ", "IYY",
+    "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "IYY",
     // Oil ETFs
     // Removed (short history on 1day/1week, binding training start): "3SOI"
     // Removed (UK-listed ETF, no intraday data before 2022, causes 249 fully-NaN cols in early folds): "LOIL"
@@ -317,49 +317,91 @@ foreach (var interval in intervals)
     }
 }
 
-// ── Build XAU/USD 4h ML dataset ───────────────────────────────────────────────
+// ── Build ML datasets for each target horizon ─────────────────────────────────
 
-Console.WriteLine("\n\n=== TRANSFORMER: building XAU/USD 4h dataset ===");
-
-// TrainingStartDate must be the latest common start across ALL long timeframes so that
-// every training row has complete data for 4h, 1day and 1week features.
-var trainingStart = DatasetConfig.LongTimeframes
-    .Where(commonStartByTf.ContainsKey)
-    .Select(tf => commonStartByTf[tf])
-    .DefaultIfEmpty()
-    .Max() is DateTime ts && ts != default ? (DateTime?)ts : null;
-
-Console.WriteLine($"Training start (max of long TF common starts):");
-foreach (var tf in DatasetConfig.LongTimeframes)
-    if (commonStartByTf.TryGetValue(tf, out var d))
-        Console.WriteLine($"  {tf,-8} {d:yyyy-MM-dd}{(d == trainingStart ? "  ← binding" : "")}");
-
-
-var trainingDir  = Path.Combine(datasetRoot, "Training");
-
-var cfg = new DatasetConfig
+BuildHorizon(new DatasetConfig
 {
-    TargetSymbol       = "XAU/USD",
-    TargetHorizons     = [("4h", 1)],
-    TrainingStartDate  = trainingStart,
-    OutputDirectory    = trainingDir   // fold CSVs written here by CreateWalkForwardSplits
-};
+    TargetSymbol    = "XAU/USD",
+    TargetHorizons  = [("4h", 1)],
+    ShortTimeframes = ["30min", "1h"],
+    LongTimeframes  = ["4h", "1day", "1week"],
+    BaseTimeframe   = "4h",
+    BaseName        = "xauusd_4h",
+    FeatureLag      = TimeSpan.FromHours(4),
+});
 
-var (rows, columns, columnStats) = Transformer.BuildFeatureMatrix(cfg, allCandles, allIndicators);
-
-if (rows.Count > 0)
+BuildHorizon(new DatasetConfig
 {
-    var csvPath      = Path.Combine(trainingDir,  "xauusd_4h_dataset.csv");
-    var bucketedPath = Path.Combine(trainingDir,  "xauusd_4h_dataset_bucketed.csv");
-    var reportPath   = Path.Combine(datasetRoot,  "xauusd_4h_report.txt");
-    var nullReportPath   = Path.Combine(datasetRoot,  "xauusd_4h_null_report.json");
-    var prunedColsPath   = Path.Combine(datasetRoot,  "xauusd_4h_pruned_columns.txt");
+    TargetSymbol    = "XAU/USD",
+    TargetHorizons  = [("1day", 1)],
+    ShortTimeframes = [],
+    LongTimeframes  = ["4h", "1day", "1week"],
+    BaseTimeframe   = "1day",
+    BaseName        = "xauusd_1day",
+    FeatureLag      = TimeSpan.FromDays(1),
+});
 
-    (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath, threshold: 0.7);
+BuildHorizon(new DatasetConfig
+{
+    TargetSymbol    = "XAU/USD",
+    TargetHorizons  = [("1week", 1)],
+    ShortTimeframes = [],
+    LongTimeframes  = ["1day", "1week"],
+    BaseTimeframe   = "1week",
+    BaseName        = "xauusd_1week",
+    FeatureLag      = TimeSpan.FromDays(7),
+});
+
+void BuildHorizon(DatasetConfig cfg)
+{
+    Console.WriteLine($"\n\n=== TRANSFORMER: building {cfg.BaseName} dataset ===");
+
+    // Training start = latest common start across this config's long timeframes
+    var start = cfg.LongTimeframes
+        .Where(commonStartByTf.ContainsKey)
+        .Select(tf => commonStartByTf[tf])
+        .DefaultIfEmpty()
+        .Max() is DateTime ts && ts != default ? (DateTime?)ts : null;
+
+    Console.WriteLine($"Training start:");
+    foreach (var tf in cfg.LongTimeframes)
+        if (commonStartByTf.TryGetValue(tf, out var d))
+            Console.WriteLine($"  {tf,-8} {d:yyyy-MM-dd}{(d == start ? "  ← binding" : "")}");
+
+    var outputDir = Path.Combine(datasetRoot, cfg.BaseName);
+    Directory.CreateDirectory(outputDir);
+
+    var fullCfg = new DatasetConfig
+    {
+        TargetSymbol    = cfg.TargetSymbol,
+        TargetHorizons  = cfg.TargetHorizons,
+        ShortTimeframes = cfg.ShortTimeframes,
+        LongTimeframes  = cfg.LongTimeframes,
+        BaseTimeframe   = cfg.BaseTimeframe,
+        BaseName        = cfg.BaseName,
+        FeatureLag      = cfg.FeatureLag,
+        TrainingStartDate = start,
+        OutputDirectory   = outputDir,
+    };
+
+    var (rows, columns, _) = Transformer.BuildFeatureMatrix(fullCfg, allCandles, allIndicators);
+    if (rows.Count == 0) { Console.WriteLine($"  [SKIP] No rows produced for {cfg.BaseName}."); return; }
+
+    var csvPath            = Path.Combine(outputDir, $"{cfg.BaseName}_dataset.csv");
+    var reportPath         = Path.Combine(outputDir, $"{cfg.BaseName}_report.txt");
+    var nullReportPath     = Path.Combine(outputDir, $"{cfg.BaseName}_null_report.json");
+    var prunedColsPath     = Path.Combine(outputDir, $"{cfg.BaseName}_pruned_columns.txt");
+    var prunedKeywordsPath = Path.Combine(outputDir, $"{cfg.BaseName}_pruned_keywords.txt");
+
+    (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath, threshold: cfg.SparseColThreshold);
+    if (cfg.PruneKeywords.Length > 0)
+        (rows, columns) = Transformer.PruneByKeyword(rows, columns,
+            keywords:        cfg.PruneKeywords,
+            excludeKeywords: cfg.PruneExcludeKeywords,
+            reportPath:      prunedKeywordsPath);
 
     Transformer.ExportToCsv(rows, columns, csvPath);
-    Transformer.BucketTargets(csvPath, bucketedPath);
-    Transformer.CreateWalkForwardSplits(rows, columns, cfg);
+    Transformer.SplitByNanBucket(rows, columns, outputDir, baseName: $"{cfg.BaseName}_dataset");
     Transformer.GenerateDatasetReport(rows, columns, reportPath);
     Transformer.GenerateNullReport(rows, columns, nullReportPath);
 }

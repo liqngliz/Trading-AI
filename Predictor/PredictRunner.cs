@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Imputers;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 
@@ -7,41 +8,43 @@ namespace Predictor;
 
 public static class PredictRunner
 {
+    // Must match the buckets produced by the Transformer and trained by the Trainer.
+    // Ordered from best data quality (lowest NaN) to worst.
+    private static readonly (string Suffix, double MaxNanPct, string Label)[] Buckets =
+    [
+        ("nan_0_66",   0.66, "≤66% NaN"),
+        ("nan_66_100", 1.00, ">66% NaN"),
+    ];
+
     /// <summary>
-    /// For each trained model (.zip + .features.json) found in <paramref name="modelDir"/>,
-    /// predicts on the most recent row of the dataset CSV and prints the result.
+    /// For each target column, selects the appropriate NaN-bucket model based on
+    /// the feature availability of the most recent dataset row, and prints the prediction.
+    /// Uses KNN imputation for ≤50% NaN buckets and mean imputation for sparser buckets.
     /// </summary>
     public static void Run(string datasetDir, string modelDir)
     {
-        var csvPath = Path.Combine(datasetDir, "xauusd_4h_dataset.csv");
-        if (!File.Exists(csvPath))
+        var csvPath = Directory.GetFiles(datasetDir, "*_dataset.csv").FirstOrDefault();
+        if (csvPath is null)
         {
-            Console.WriteLine($"ERROR: Dataset not found: {csvPath}");
+            Console.WriteLine($"ERROR: No *_dataset.csv found in: {datasetDir}");
             return;
         }
 
-        var modelFiles = Directory.GetFiles(modelDir, "*.zip")
-            .OrderBy(f => f)
-            .ToArray();
-
-        if (modelFiles.Length == 0)
-        {
-            Console.WriteLine($"No trained models found in: {modelDir}");
-            Console.WriteLine("Run training first (omit --predict).");
-            return;
-        }
-
-        // ── Read CSV header ───────────────────────────────────────────────────
+        // ── Read header ───────────────────────────────────────────────────────
         var allCols  = File.ReadLines(csvPath).First().Split(',');
         var colIndex = allCols.Select((n, i) => (n, i)).ToDictionary(x => x.n, x => x.i);
 
-        // ── Load a recent window of rows as reference data for the imputer ────
-        // Using the last 1 000 rows is far more than enough for KNN (k=5).
-        const int refWindowSize = 1_000;
+        // Feature columns (used to compute NaN rate of the query row)
+        var featureCols = allCols
+            .Where(c => c != "Timestamp" && !c.Contains("_Target_"))
+            .ToArray();
+
+        // ── Load last 1000 rows (reference for imputation + query row) ────────
+        const int refWindow = 1_000;
         var recentLines = File.ReadLines(csvPath)
             .Skip(1)
             .Where(l => !string.IsNullOrWhiteSpace(l))
-            .TakeLast(refWindowSize)
+            .TakeLast(refWindow)
             .ToArray();
 
         if (recentLines.Length == 0)
@@ -50,16 +53,36 @@ public static class PredictRunner
             return;
         }
 
-        // The very last bar in the CSV is the "current" bar:
-        // its target column is NaN (the future close hasn't happened yet).
-        // That is the row we predict on.
-        var lastParts = recentLines[^1].Split(',');
-        var barTimestamp = lastParts.Length > 0 ? lastParts[0] : "?";
+        var lastParts     = recentLines[^1].Split(',');
+        var barTimestamp  = lastParts.Length > 0 ? lastParts[0] : "?";
 
-        Console.WriteLine($"Predicting for bar : {barTimestamp}");
-        Console.WriteLine($"Models directory   : {modelDir}");
-        Console.WriteLine($"Reference rows     : {recentLines.Length - 1} (last {refWindowSize} minus query)");
+        // ── Compute NaN rate of the last row (all feature columns) ────────────
+        int nanCount = featureCols.Count(c =>
+        {
+            if (!colIndex.TryGetValue(c, out var idx)) return true;
+            return idx >= lastParts.Length || string.IsNullOrEmpty(lastParts[idx]);
+        });
+        double nanPct = featureCols.Length > 0 ? (double)nanCount / featureCols.Length : 1.0;
+
+        Console.WriteLine($"Bar           : {barTimestamp}");
+        Console.WriteLine($"Feature NaN   : {nanCount}/{featureCols.Length}  ({nanPct:P1})");
+
+        // Select the tightest bucket that covers the query row's NaN rate
+        var bucket = Buckets.First(b => nanPct <= b.MaxNanPct);
+        Console.WriteLine($"Model bucket  : {bucket.Label} ({bucket.Suffix})");
         Console.WriteLine();
+
+        // ── Find all models for this bucket ───────────────────────────────────
+        var modelFiles = Directory.GetFiles(modelDir, $"*_{bucket.Suffix}.zip")
+            .OrderBy(f => f)
+            .ToArray();
+
+        if (modelFiles.Length == 0)
+        {
+            Console.WriteLine($"No trained models found for bucket '{bucket.Suffix}' in: {modelDir}");
+            Console.WriteLine("Run the Trainer first.");
+            return;
+        }
 
         var mlContext = new MLContext(seed: 42);
 
@@ -68,40 +91,43 @@ public static class PredictRunner
             var metaPath = Path.ChangeExtension(modelPath, ".features.json");
             if (!File.Exists(metaPath))
             {
-                Console.WriteLine($"[SKIP] {Path.GetFileName(modelPath)} — no .features.json sidecar (re-train to generate it)");
+                Console.WriteLine($"[SKIP] {Path.GetFileName(modelPath)} — no .features.json sidecar");
                 continue;
             }
 
             var meta = JsonSerializer.Deserialize<ModelMeta>(File.ReadAllText(metaPath))!;
 
-            // Resolve feature column indices
+            // Resolve model-specific feature indices
             var featureIndices = meta.FeatureColumns
                 .Select(c => colIndex.TryGetValue(c, out var idx) ? idx : -1)
                 .ToArray();
 
-            var missingCols = meta.FeatureColumns
-                .Where(c => !colIndex.ContainsKey(c))
-                .ToArray();
-
+            var missingCols = meta.FeatureColumns.Where(c => !colIndex.ContainsKey(c)).ToArray();
             if (missingCols.Length > 0)
             {
-                Console.WriteLine($"[SKIP] {meta.TargetColumn} — {missingCols.Length} feature(s) absent from current CSV (re-train or re-import)");
+                Console.WriteLine($"[SKIP] {meta.TargetColumn}/{bucket.Suffix} — {missingCols.Length} feature(s) not in current CSV (re-import)");
                 continue;
             }
 
             // ── Parse feature rows ────────────────────────────────────────────
             var allFeatureRows = ParseFeatureRows(recentLines, featureIndices);
+            var refData        = allFeatureRows.Length > 1 ? allFeatureRows[..^1] : allFeatureRows;
+            var queryRow       = new[] { allFeatureRows[^1] };
 
-            // Reference = all rows except the last; query = last row
-            var refData   = allFeatureRows.Length > 1
-                ? allFeatureRows[..^1]
-                : allFeatureRows;
-            var queryRow  = new[] { allFeatureRows[^1] };
-
-            // ── Impute ────────────────────────────────────────────────────────
-            var imputer = new KnnImputer(k: 5, maxDistanceCols: 100);
-            imputer.Fit(refData);
-            var imputedQuery = imputer.Transform(queryRow);
+            // ── Impute (use same imputer as at training time) ─────────────────
+            float[][] imputedQuery;
+            if (meta.Imputer == "knn")
+            {
+                var imputer = new KnnImputer(k: 5, maxDistanceCols: 100);
+                imputer.Fit(refData);
+                imputedQuery = imputer.Transform(queryRow);
+            }
+            else
+            {
+                var imputer = new MeanImputer();
+                imputer.Fit(refData);
+                imputedQuery = imputer.Transform(queryRow);
+            }
 
             // ── Build single-row IDataView ────────────────────────────────────
             var schemaDef = SchemaDefinition.Create(typeof(ModelInput));
@@ -112,13 +138,12 @@ public static class PredictRunner
                 [new ModelInput { Features = imputedQuery[0], Label = 0f }],
                 schemaDef);
 
-            // ── Load model and score ──────────────────────────────────────────
+            // ── Score ─────────────────────────────────────────────────────────
             var model     = mlContext.Model.Load(modelPath, out _);
             var predicted = model.Transform(dataView);
             var score     = predicted.GetColumn<float>("Score").First();
 
-            // ── Output ───────────────────────────────────────────────────────
-            Console.WriteLine($"┌─ {meta.TargetColumn}");
+            Console.WriteLine($"┌─ {meta.TargetColumn}  [{bucket.Label}]");
             Console.WriteLine($"│  Score  : {score:+0.0000;-0.0000}  (vol-normalised log return)");
             Console.WriteLine($"│  Signal : {(score > 0 ? "LONG  ▲" : "SHORT ▼")}");
             Console.WriteLine($"└─ Model  : {Path.GetFileName(modelPath)}");
@@ -136,7 +161,8 @@ public static class PredictRunner
             for (int j = 0; j < featureIndices.Length; j++)
             {
                 int fi  = featureIndices[j];
-                row[j] = fi < parts.Length
+                row[j] = fi >= 0
+                    && fi < parts.Length
                     && !string.IsNullOrEmpty(parts[fi])
                     && float.TryParse(parts[fi], NumberStyles.Float,
                            CultureInfo.InvariantCulture, out var fv)
