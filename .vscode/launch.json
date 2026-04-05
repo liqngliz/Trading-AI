@@ -1,7 +1,38 @@
 {
     "version": "0.2.0",
     "configurations": [
-
-        
+        {
+            "name": "Debug Importer",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build-importer",
+            "program": "${workspaceFolder}/Importer/bin/Debug/net8.0/Importer.dll",
+            "args": [],
+            "cwd": "${workspaceFolder}/Importer/bin/Debug/net8.0",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
+        },
+        {
+            "name": "Debug Predictor (train)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build-predictor",
+            "program": "${workspaceFolder}/Predictor/bin/Debug/net8.0/Predictor.dll",
+            "args": ["--train"],
+            "cwd": "${workspaceFolder}/Predictor/bin/Debug/net8.0",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
+        },
+        {
+            "name": "Debug Predictor (predict)",
+            "type": "coreclr",
+            "request": "launch",
+            "preLaunchTask": "build-predictor",
+            "program": "${workspaceFolder}/Predictor/bin/Debug/net8.0/Predictor.dll",
+            "args": ["--predict"],
+            "cwd": "${workspaceFolder}/Predictor/bin/Debug/net8.0",
+            "console": "integratedTerminal",
+            "stopAtEntry": false
+        }
     ]
 }

@@ -113,7 +113,7 @@ string[] symbols =
     "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF", "USD/CNH", "USD/CNY", 
     // ETFs
     // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
-    "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "IYY",
+    "SHY", "IEF", "TLT", "SPY", "QQQ", "EEM", "ZSL", "DGZ", "NDAQ", "IYY",
     // Oil ETFs
     // Removed (short history on 1day/1week, binding training start): "3SOI"
     // Removed (UK-listed ETF, no intraday data before 2022, causes 249 fully-NaN cols in early folds): "LOIL"
@@ -323,33 +323,90 @@ BuildHorizon(new DatasetConfig
 {
     TargetSymbol    = "XAU/USD",
     TargetHorizons  = [("4h", 1)],
-    ShortTimeframes = ["30min", "1h"],
+    ShortTimeframes = ["1h"],
     LongTimeframes  = ["4h", "1day", "1week"],
     BaseTimeframe   = "4h",
     BaseName        = "xauusd_4h",
     FeatureLag      = TimeSpan.FromHours(4),
+    RealizedVolConfig = new()
+    {
+        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
+        ["XAG/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["SPY"]     = new() { ["4h"] = [10, 20, 50] },
+    },
 });
 
 BuildHorizon(new DatasetConfig
 {
-    TargetSymbol    = "XAU/USD",
-    TargetHorizons  = [("1day", 1)],
-    ShortTimeframes = [],
+    TargetSymbol    = "XAG/USD",
+    TargetHorizons  = [("4h", 1)],
+    ShortTimeframes = ["1h"],
     LongTimeframes  = ["4h", "1day", "1week"],
-    BaseTimeframe   = "1day",
-    BaseName        = "xauusd_1day",
-    FeatureLag      = TimeSpan.FromDays(1),
+    BaseTimeframe   = "4h",
+    BaseName        = "xagusd_4h",
+    FeatureLag      = TimeSpan.FromHours(4),
+    Ratios          =
+    [
+        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
+        new("XAG/USD", "WTI/USD", "SilverOilRatio"),
+    ],
+    RealizedVolConfig = new()
+    {
+        ["XAG/USD"] = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
+        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
+    },
 });
 
 BuildHorizon(new DatasetConfig
 {
-    TargetSymbol    = "XAU/USD",
-    TargetHorizons  = [("1week", 1)],
-    ShortTimeframes = [],
-    LongTimeframes  = ["1day", "1week"],
-    BaseTimeframe   = "1week",
-    BaseName        = "xauusd_1week",
-    FeatureLag      = TimeSpan.FromDays(7),
+    TargetSymbol    = "SPY",
+    TargetHorizons  = [("4h", 1)],
+    ShortTimeframes = ["1h"],
+    LongTimeframes  = ["4h", "1day", "1week"],
+    BaseTimeframe   = "4h",
+    BaseName        = "spy_4h",
+    FeatureLag      = TimeSpan.FromHours(4),
+    Ratios          =
+    [
+        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
+        new("XAU/USD", "WTI/USD", "GoldOilRatio"),
+        new("SPY",     "WTI/USD", "SpyOilRatio"),
+    ],
+    PruneKeywords = ["_min", "_max", "_mean"],
+    RealizedVolConfig = new()
+    {
+        ["SPY"]     = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
+        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["QQQ"]     = new() { ["4h"] = [10, 20, 50] },
+    },
+});
+
+BuildHorizon(new DatasetConfig
+{
+    TargetSymbol    = "QQQ",
+    TargetHorizons  = [("4h", 1)],
+    ShortTimeframes = ["1h"],
+    LongTimeframes  = ["4h", "1day", "1week"],
+    BaseTimeframe   = "4h",
+    BaseName        = "qqq_4h",
+    FeatureLag      = TimeSpan.FromHours(4),
+    Ratios          =
+    [
+        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
+        new("XAU/USD", "WTI/USD", "GoldOilRatio"),
+        new("QQQ",     "WTI/USD", "QqqOilRatio"),
+    ],
+    PruneKeywords = ["_min", "_max", "_mean"],
+    RealizedVolConfig = new()
+    {
+        ["QQQ"]     = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
+        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
+        ["SPY"]     = new() { ["4h"] = [10, 20, 50] },
+    },
 });
 
 void BuildHorizon(DatasetConfig cfg)
@@ -373,19 +430,24 @@ void BuildHorizon(DatasetConfig cfg)
 
     var fullCfg = new DatasetConfig
     {
-        TargetSymbol    = cfg.TargetSymbol,
-        TargetHorizons  = cfg.TargetHorizons,
-        ShortTimeframes = cfg.ShortTimeframes,
-        LongTimeframes  = cfg.LongTimeframes,
-        BaseTimeframe   = cfg.BaseTimeframe,
-        BaseName        = cfg.BaseName,
-        FeatureLag      = cfg.FeatureLag,
+        TargetSymbol      = cfg.TargetSymbol,
+        TargetHorizons    = cfg.TargetHorizons,
+        ShortTimeframes   = cfg.ShortTimeframes,
+        LongTimeframes    = cfg.LongTimeframes,
+        BaseTimeframe     = cfg.BaseTimeframe,
+        BaseName          = cfg.BaseName,
+        FeatureLag        = cfg.FeatureLag,
+        Ratios            = cfg.Ratios,
+        RealizedVolConfig = cfg.RealizedVolConfig,
+        VolRatioMaPeriods = cfg.VolRatioMaPeriods,
+        PruneKeywords     = cfg.PruneKeywords,
         TrainingStartDate = start,
         OutputDirectory   = outputDir,
     };
 
     var (rows, columns, _) = Transformer.BuildFeatureMatrix(fullCfg, allCandles, allIndicators);
     if (rows.Count == 0) { Console.WriteLine($"  [SKIP] No rows produced for {cfg.BaseName}."); return; }
+    Console.WriteLine($"  Rows before pruning : {rows.Count}  Columns: {columns.Length}");
 
     var csvPath            = Path.Combine(outputDir, $"{cfg.BaseName}_dataset.csv");
     var reportPath         = Path.Combine(outputDir, $"{cfg.BaseName}_report.txt");
@@ -400,6 +462,7 @@ void BuildHorizon(DatasetConfig cfg)
             excludeKeywords: cfg.PruneExcludeKeywords,
             reportPath:      prunedKeywordsPath);
 
+    Console.WriteLine($"  Rows after pruning  : {rows.Count}  Columns: {columns.Length}");
     Transformer.ExportToCsv(rows, columns, csvPath);
     Transformer.SplitByNanBucket(rows, columns, outputDir, baseName: $"{cfg.BaseName}_dataset");
     Transformer.GenerateDatasetReport(rows, columns, reportPath);

@@ -2,12 +2,24 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "build",
+            "label": "build-importer",
             "command": "dotnet",
             "type": "process",
             "args": [
                 "build",
                 "${workspaceFolder}/Importer/Importer.csproj",
+                "--configuration",
+                "Debug"
+            ],
+            "problemMatcher": "$msCompile"
+        },
+        {
+            "label": "build-predictor",
+            "command": "dotnet",
+            "type": "process",
+            "args": [
+                "build",
+                "${workspaceFolder}/Predictor/Predictor.csproj",
                 "--configuration",
                 "Debug"
             ],

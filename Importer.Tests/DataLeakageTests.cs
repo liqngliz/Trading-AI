@@ -42,8 +42,8 @@ public class DataLeakageTests
         MacdSignal        = 0,
         DistN             = 0,
         AdZScorePeriod    = 0,
-        RealizedVolPeriod = 20,
-        VolRatioMaPeriod  = 0,
+        RealizedVolConfig = new() { ["XAU/USD"] = new() { ["4h"] = [20] } },
+        VolRatioMaPeriods = [0],   // vol ratio disabled; only the scalar is needed
         WalkForwardFolds  = 1,
     };
 
@@ -372,8 +372,9 @@ public class DataLeakageTests
 
     /// <summary>
     /// Verifies the exact normalised target formula:
-    ///   Target_4h_Return = log(close[20] / close[19]) / max(RealizedVol_20, 1e-8)
+    ///   Target_4h_Return = log(close[20] / close[19]) / RealizedVol_20
     /// where RealizedVol_20 is the population std of log returns over bars 0–19.
+    /// No floor is applied: rows where vol ≤ 1e-5 are excluded rather than inflated.
     /// </summary>
     [Fact]
     public void Target_Equals_VolNormalisedLogReturn()
@@ -389,13 +390,12 @@ public class DataLeakageTests
         var logRets = Enumerable.Range(1, 19)
             .Select(i => Math.Log((double)closes[i] / (double)closes[i - 1]))
             .ToArray();
-        double mean    = logRets.Average();
-        double variance = logRets.Average(v => (v - mean) * (v - mean));
-        double realizedVol = Math.Sqrt(variance);
-        double volScalar   = Math.Max(realizedVol, 1e-8);
+        double mean        = logRets.Average();
+        double variance    = logRets.Average(v => (v - mean) * (v - mean));
+        double realizedVol = Math.Sqrt(variance);   // no Math.Max floor: vol is used directly
 
-        double rawReturn = Math.Log((double)closes[20] / (double)closes[19]);
-        double expectedTarget = rawReturn / volScalar;
+        double rawReturn    = Math.Log((double)closes[20] / (double)closes[19]);
+        double expectedTarget = rawReturn / realizedVol;
 
         Assert.NotNull(row.Values["XAUUSD_Target_4h_Return"]);
         Assert.Equal(expectedTarget, row.Values["XAUUSD_Target_4h_Return"]!.Value,

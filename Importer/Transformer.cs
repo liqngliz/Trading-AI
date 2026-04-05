@@ -16,7 +16,7 @@ public sealed class DatasetConfig
     // Precious metals
     "XAU/USD", "XAG/USD", "XPT/USD", "XPD/USD",
     // Forex
-    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH",
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "USD/CAD", "USD/CHF", "USD/CNH", "USD/BAHT",
     // ETFs
     // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
     "SHY", "IEF", "TLT", "SPY", "EEM", "ZSL", "DGZ", "NDAQ", "QQQ", "IYY",
@@ -82,10 +82,16 @@ public sealed class DatasetConfig
     /// </summary>
     public TimeSpan FeatureLag    { get; init; } = TimeSpan.Zero;
 
-    /// <summary>Window (bars) for rolling std of log-returns on target symbol 4h series. 0 = disabled.</summary>
-    public int RealizedVolPeriod  { get; init; } = 20;
-    /// <summary>Window (bars) for rolling mean of realized vol used in the vol ratio. 0 = disabled.</summary>
-    public int VolRatioMaPeriod   { get; init; } = 200;
+    /// <summary>
+    /// Realized vol to compute: symbol → timeframe → periods (bars).
+    /// Only the specified combinations are built. Each symbol/TF entry
+    /// gets one RealizedVol column per period and one VolRatio column
+    /// per period where the corresponding <see cref="VolRatioMaPeriods"/> entry is > 0.
+    /// </summary>
+    public Dictionary<string, Dictionary<string, int[]>> RealizedVolConfig { get; init; } = [];
+
+    /// <summary>Rolling MA windows for vol ratio, paired 1:1 with the periods array per entry. 0 = skip ratio for that period index.</summary>
+    public int[] VolRatioMaPeriods { get; init; } = [100, 200, 200];
 
     public int WalkForwardFolds { get; init; } = 10;
     public int PurgeBarsGap     { get; init; } = 50;  // in 4h bars (~200 hours; prevents regime autocorrelation leaking across the train/val boundary)
@@ -108,7 +114,20 @@ public sealed class DatasetConfig
 
     /// <summary>If a column name contains any of these substrings, keyword pruning is skipped for it.</summary>
     public string[] PruneExcludeKeywords { get; init; } = ["Bb", "RSI", "Stoch"];
+
+    /// <summary>
+    /// Cross-asset price ratios to compute as features (numerator / denominator, rolling z-scored).
+    /// Each ratio produces one column named <see cref="RatioDef.ColumnName"/>.
+    /// </summary>
+    public RatioDef[] Ratios { get; init; } =
+    [
+        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
+        new("XAU/USD", "WTI/USD", "GoldOilRatio"),
+    ];
 }
+
+/// <summary>A price ratio feature: numerator / denominator, rolling z-scored.</summary>
+public sealed record RatioDef(string Numerator, string Denominator, string ColumnName);
 
 // ── Row ───────────────────────────────────────────────────────────────────────
 
@@ -126,12 +145,14 @@ public static class Transformer
 {
     private static readonly JsonSerializerOptions JsonIndented = new() { WriteIndented = true };
 
-    private static readonly string[] CrossAssetCols =
+    private static readonly string[] FixedCrossAssetCols =
     [
-        "GoldSilverRatio", "GoldOilRatio",
         "DXY_Mom_1h", "DXY_Mom_4h",
         "YieldCurveProxy", "RiskSentiment", "VolatilityRegime"
     ];
+
+    private static string[] BuildCrossAssetCols(DatasetConfig cfg) =>
+        [.. cfg.Ratios.Select(r => r.ColumnName), .. FixedCrossAssetCols];
 
     private static readonly string[] TimeCols =
     [
@@ -205,7 +226,7 @@ public static class Transformer
 
         AddCol("Timestamp");
         foreach (var c in TimeCols)        AddCol(c);
-        foreach (var c in CrossAssetCols)  AddCol(c);
+        foreach (var c in BuildCrossAssetCols(cfg))  AddCol(c);
 
         var indicatorNames = BuildIndicatorNames(cfg);
         int nInds  = indicatorNames.Length;
@@ -233,11 +254,28 @@ public static class Transformer
         }
 
         var targetSafe = SafeSymbol(cfg.TargetSymbol);
-        if (cfg.RealizedVolPeriod > 0)
-            AddCol($"{targetSafe}_RealizedVol_{cfg.RealizedVolPeriod}");
-        if (cfg.RealizedVolPeriod > 0 && cfg.VolRatioMaPeriod > 0)
-            AddCol($"{targetSafe}_VolRatio_{cfg.RealizedVolPeriod}_{cfg.VolRatioMaPeriod}");
-        if (cfg.RealizedVolPeriod > 0)
+        // RealizedVol columns: configured symbol × timeframe × periods
+        foreach (var (sym, tfMap) in cfg.RealizedVolConfig)
+        {
+            var safe = SafeSymbol(sym);
+            foreach (var (tf, periods) in tfMap)
+            {
+                for (int pi = 0; pi < periods.Length; pi++)
+                {
+                    int p = periods[pi];
+                    if (p <= 0) continue;
+                    AddCol($"{safe}_{tf}_RealizedVol_{p}");
+                    int maP = pi < cfg.VolRatioMaPeriods.Length ? cfg.VolRatioMaPeriods[pi] : 0;
+                    if (maP > 0)
+                        AddCol($"{safe}_{tf}_VolRatio_{p}_{maP}");
+                }
+            }
+        }
+        // TargetVolScalar: first entry for target symbol + base timeframe, if configured
+        bool hasVolScalar = cfg.RealizedVolConfig.TryGetValue(cfg.TargetSymbol, out var targetTfMap)
+            && targetTfMap.TryGetValue(cfg.BaseTimeframe, out var targetPeriods)
+            && targetPeriods.Length > 0 && targetPeriods[0] > 0;
+        if (hasVolScalar)
             AddCol($"{targetSafe}_TargetVolScalar");
         foreach (var (tf, _) in cfg.TargetHorizons) AddCol($"{targetSafe}_Target_{tf}_Return");
         foreach (var (tf, _) in cfg.TargetHorizons) AddCol($"{targetSafe}_Target_{tf}_Quintile");
@@ -315,94 +353,123 @@ public static class Transformer
             return ([], columns.ToArray(), []);
         }
 
-        // ── Pre-compute realized vol and vol ratio for target symbol (4h) ─────
+        // ── Pre-compute realized vol + vol ratio: all assets × long TFs × periods ──
         int nBars = baseSd.Times.Length;
-        var realizedVols = new double?[nBars];
-        var volRatios    = new double?[nBars];
 
-        if (cfg.RealizedVolPeriod > 0)
+        // rvMap[(ai, ti, pi)] = realized vol series aligned to baseSd.Times
+        // vrMap[(ai, ti, pi)] = vol ratio series (rv / rolling MA of rv)
+        var rvMap = new Dictionary<(int, int, int), double?[]>();
+        var vrMap = new Dictionary<(int, int, int), double?[]>();
+
+        static double?[] ComputeRv(double[] close, int period)
         {
-            var logRets = new double?[nBars];
-            for (int i = 1; i < nBars; i++)
-            {
-                double c0 = baseSd.Close[i - 1], c1 = baseSd.Close[i];
-                if (c0 > 0) logRets[i] = Math.Log(c1 / c0);
-            }
-
-            for (int i = cfg.RealizedVolPeriod - 1; i < nBars; i++)
+            int n = close.Length;
+            var logRets = new double?[n];
+            for (int i = 1; i < n; i++)
+                if (close[i - 1] > 0) logRets[i] = Math.Log(close[i] / close[i - 1]);
+            var rv = new double?[n];
+            for (int i = period - 1; i < n; i++)
             {
                 double sum = 0, sumSq = 0; int cnt = 0;
-                for (int j = i - cfg.RealizedVolPeriod + 1; j <= i; j++)
+                for (int j = i - period + 1; j <= i; j++)
                 {
                     if (!logRets[j].HasValue) continue;
                     sum += logRets[j]!.Value; sumSq += logRets[j]!.Value * logRets[j]!.Value; cnt++;
                 }
-                if (cnt >= 2)
-                {
-                    double mean = sum / cnt;
-                    realizedVols[i] = Math.Sqrt(Math.Max(0, sumSq / cnt - mean * mean));
-                }
+                if (cnt >= 2) { double m = sum / cnt; rv[i] = Math.Sqrt(Math.Max(0, sumSq / cnt - m * m)); }
             }
+            return rv;
+        }
 
-            if (cfg.VolRatioMaPeriod > 0)
+        static double?[] ComputeVratio(double?[] rv, int maPeriod)
+        {
+            int n = rv.Length;
+            var vr = new double?[n];
+            for (int i = maPeriod - 1; i < n; i++)
             {
-                for (int i = cfg.VolRatioMaPeriod - 1; i < nBars; i++)
+                if (!rv[i].HasValue) continue;
+                double maSum = 0; int maCnt = 0;
+                for (int j = i - maPeriod + 1; j <= i; j++)
+                    if (rv[j].HasValue) { maSum += rv[j]!.Value; maCnt++; }
+                if (maCnt > 0 && maSum > 0) vr[i] = rv[i]!.Value / (maSum / maCnt);
+            }
+            return vr;
+        }
+
+        // For each asset × long TF, align the series to baseSd.Times then compute rv/vr
+        foreach (var (sym, tfMap) in cfg.RealizedVolConfig)
+        {
+            int ai = Array.IndexOf(DatasetConfig.AllAssets, sym);
+            if (ai < 0) continue;
+            foreach (var (tf, periods) in tfMap)
+            {
+                int ti = Array.IndexOf(cfg.LongTimeframes, tf);
+                if (ti < 0) continue;
+                var sd = longSd[ai][ti];
+                if (sd == null) continue;
+
+                var alignedClose = new double[nBars];
+                for (int i = 0; i < nBars; i++)
                 {
-                    if (!realizedVols[i].HasValue) continue;
-                    double maSum = 0; int maCnt = 0;
-                    for (int j = i - cfg.VolRatioMaPeriod + 1; j <= i; j++)
-                    {
-                        if (realizedVols[j].HasValue) { maSum += realizedVols[j]!.Value; maCnt++; }
-                    }
-                    if (maCnt > 0 && maSum > 0)
-                        volRatios[i] = realizedVols[i]!.Value / (maSum / maCnt);
+                    int idx = BsFloor(sd.Times, baseSd.Times[i]);
+                    alignedClose[i] = idx >= 0 ? sd.Close[idx] : double.NaN;
+                }
+
+                for (int pi = 0; pi < periods.Length; pi++)
+                {
+                    int p = periods[pi];
+                    if (p <= 0) continue;
+                    var rv = ComputeRv(alignedClose, p);
+                    rvMap[(ai, ti, pi)] = rv;
+                    int maP = pi < cfg.VolRatioMaPeriods.Length ? cfg.VolRatioMaPeriods[pi] : 0;
+                    if (maP > 0) vrMap[(ai, ti, pi)] = ComputeVratio(rv, maP);
                 }
             }
         }
 
+        // VolScalar: target symbol, base timeframe, first configured period
+        int targetAiForVol = Array.IndexOf(DatasetConfig.AllAssets, cfg.TargetSymbol);
+        int targetTiForVol = Array.IndexOf(cfg.LongTimeframes, cfg.BaseTimeframe);
+        var realizedVols   = hasVolScalar && rvMap.TryGetValue((targetAiForVol, targetTiForVol, 0), out var rv0) ? rv0 : null;
+
         // Pre-look up cross-asset SeriesData indices
-        int xauAi  = Array.IndexOf(DatasetConfig.AllAssets, "XAU/USD");
-        int xagAi  = Array.IndexOf(DatasetConfig.AllAssets, "XAG/USD");
-        int wtiAi  = Array.IndexOf(DatasetConfig.AllAssets, "WTI/USD");
         int tltAi  = Array.IndexOf(DatasetConfig.AllAssets, "TLT");
         int shyAi  = Array.IndexOf(DatasetConfig.AllAssets, "SHY");
         int spyAi  = Array.IndexOf(DatasetConfig.AllAssets, "SPY");
         int vixyAi = Array.IndexOf(DatasetConfig.AllAssets, "VIXY");
         int udnAi  = Array.IndexOf(DatasetConfig.AllAssets, "UDN");
         int tf1hShortTi = Array.IndexOf(cfg.ShortTimeframes, "1h");
-        // cross-asset DXY mom uses 1h short and 4h long UDN
 
-        // ── Pre-compute cross-asset ratio z-scores ────────────────────────────
-        // Raw price ratios (gold/silver, gold/oil) are non-stationary: as gold
-        // trends the level drifts, letting the model learn which regime/year it
-        // is in rather than a genuine cross-asset signal.  Z-scoring over a
-        // rolling window removes the level before the model sees the values.
-        var sdXau4h = xauAi >= 0 && base4hTi >= 0 ? longSd[xauAi][base4hTi] : null;
-        var sdXag4h = xagAi >= 0 && base4hTi >= 0 ? longSd[xagAi][base4hTi] : null;
-        var sdWti4h = wtiAi >= 0 && base4hTi >= 0 ? longSd[wtiAi][base4hTi] : null;
-        var gsRatioRaw = new double[nBars];
-        var goRatioRaw = new double[nBars];
-        for (int i = 0; i < nBars; i++)
+        // ── Pre-compute configured ratio z-scores ─────────────────────────────
+        // Raw price ratios are non-stationary — z-score over rolling window
+        // to remove level drift before the model sees the values.
+        int ratioZPeriod = cfg.AdZScorePeriod > 0 ? cfg.AdZScorePeriod : 252;
+        var ratioZScores = new double[cfg.Ratios.Length][];
+        for (int ri = 0; ri < cfg.Ratios.Length; ri++)
         {
-            var t       = baseSd.Times[i];
-            int gi      = sdXau4h != null ? BsFloor(sdXau4h.Times, t) : -1;
-            int agi     = sdXag4h != null ? BsFloor(sdXag4h.Times, t) : -1;
-            int wi      = sdWti4h != null ? BsFloor(sdWti4h.Times, t) : -1;
-            double gold   = gi  >= 0 ? sdXau4h!.Close[gi]  : double.NaN;
-            double silver = agi >= 0 ? sdXag4h!.Close[agi] : double.NaN;
-            double oil    = wi  >= 0 ? sdWti4h!.Close[wi]  : double.NaN;
-            gsRatioRaw[i] = silver > 0 ? gold / silver : double.NaN;
-            goRatioRaw[i] = oil    > 0 ? gold / oil    : double.NaN;
+            var ratio  = cfg.Ratios[ri];
+            int numAi  = Array.IndexOf(DatasetConfig.AllAssets, ratio.Numerator);
+            int denAi  = Array.IndexOf(DatasetConfig.AllAssets, ratio.Denominator);
+            var sdNum  = numAi >= 0 && base4hTi >= 0 ? longSd[numAi][base4hTi] : null;
+            var sdDen  = denAi >= 0 && base4hTi >= 0 ? longSd[denAi][base4hTi] : null;
+            var raw    = new double[nBars];
+            for (int i = 0; i < nBars; i++)
+            {
+                var t    = baseSd.Times[i];
+                int ni   = sdNum != null ? BsFloor(sdNum.Times, t) : -1;
+                int di   = sdDen != null ? BsFloor(sdDen.Times, t) : -1;
+                double n = ni >= 0 ? sdNum!.Close[ni] : double.NaN;
+                double d = di >= 0 ? sdDen!.Close[di] : double.NaN;
+                raw[i]   = d > 0 ? n / d : double.NaN;
+            }
+            ratioZScores[ri] = RollingZScore(raw, ratioZPeriod);
         }
-        int ratioZPeriod   = cfg.AdZScorePeriod > 0 ? cfg.AdZScorePeriod : 252;
-        double[] goldSilverZ = RollingZScore(gsRatioRaw, ratioZPeriod);
-        double[] goldOilZ    = RollingZScore(goRatioRaw, ratioZPeriod);
 
         // Pre-computed column indices for time + cross-asset
         int ciHourSin = colIndex["HourOfDay_Sin"], ciHourCos = colIndex["HourOfDay_Cos"];
         int ciDowSin  = colIndex["DayOfWeek_Sin"],  ciDowCos  = colIndex["DayOfWeek_Cos"];
         int ciSession = colIndex["Session"];
-        var xaCols    = CrossAssetCols.Select(c => colIndex.TryGetValue(c, out var i) ? i : -1).ToArray();
+        var xaCols    = BuildCrossAssetCols(cfg).Select(c => colIndex.TryGetValue(c, out var i) ? i : -1).ToArray();
 
         // Indicator indices used by cross-asset features
         int indLogReturn = 0; // always first
@@ -480,29 +547,49 @@ public static class Transformer
             }
 
             // ── Cross-asset features ──────────────────────────────────────────
+            var ratioZAtCutoff = ratioZScores
+                .Select(z => cutoffBi >= 0 ? z[cutoffBi] : double.NaN)
+                .ToArray();
             WriteCrossAsset(vals, cutoff, longSd, shortSd,
-                cutoffBi >= 0 ? goldSilverZ[cutoffBi] : double.NaN,
-                cutoffBi >= 0 ? goldOilZ[cutoffBi]    : double.NaN,
+                ratioZAtCutoff,
                 tltAi, shyAi, spyAi, vixyAi, udnAi,
                 base4hTi, tf1hShortTi, xaCols,
                 indLogReturn, indRsi, indAtr);
 
-            // ── Realized vol / vol ratio / vol scalar ─────────────────────────
-            var rvAtCutoff = cutoffBi >= 0 ? realizedVols[cutoffBi] : null;
-            var vrAtCutoff = cutoffBi >= 0 ? volRatios[cutoffBi]    : null;
-
-            if (cfg.RealizedVolPeriod > 0 &&
-                colIndex.TryGetValue($"{targetSafe}_RealizedVol_{cfg.RealizedVolPeriod}", out var rvColIdx))
-                vals[rvColIdx] = rvAtCutoff;
-
-            if (cfg.RealizedVolPeriod > 0 && cfg.VolRatioMaPeriod > 0 &&
-                colIndex.TryGetValue($"{targetSafe}_VolRatio_{cfg.RealizedVolPeriod}_{cfg.VolRatioMaPeriod}", out var vrColIdx))
-                vals[vrColIdx] = vrAtCutoff;
-
-            double? volScalar = null;
-            if (cfg.RealizedVolPeriod > 0 && rvAtCutoff.HasValue)
+            // ── Realized vol / vol ratio columns (configured symbol × TF × period) ──
+            foreach (var (sym2, tfMap2) in cfg.RealizedVolConfig)
             {
-                volScalar = Math.Max(rvAtCutoff!.Value, 1e-8);
+                int ai2   = Array.IndexOf(DatasetConfig.AllAssets, sym2);
+                var safe2 = SafeSymbol(sym2);
+                foreach (var (tf2, periods2) in tfMap2)
+                {
+                    int ti2 = Array.IndexOf(cfg.LongTimeframes, tf2);
+                    for (int pi = 0; pi < periods2.Length; pi++)
+                    {
+                        int p = periods2[pi];
+                        if (p <= 0) continue;
+
+                        if (rvMap.TryGetValue((ai2, ti2, pi), out var rvSeries) &&
+                            colIndex.TryGetValue($"{safe2}_{tf2}_RealizedVol_{p}", out var rvci))
+                            vals[rvci] = cutoffBi >= 0 ? rvSeries[cutoffBi] : null;
+
+                        int maP = pi < cfg.VolRatioMaPeriods.Length ? cfg.VolRatioMaPeriods[pi] : 0;
+                        if (maP > 0 && vrMap.TryGetValue((ai2, ti2, pi), out var vrSeries) &&
+                            colIndex.TryGetValue($"{safe2}_{tf2}_VolRatio_{p}_{maP}", out var vrci))
+                            vals[vrci] = cutoffBi >= 0 ? vrSeries[cutoffBi] : null;
+                    }
+                }
+            }
+
+            // ── Vol scalar from target symbol base TF, first period ───────────
+            var rvAtCutoff = cutoffBi >= 0 && realizedVols != null ? realizedVols[cutoffBi] : null;
+            double? volScalar = null;
+            // Only use vol scalar when it is reliably positive (> 1e-5).
+            // Near-zero vol indicates a DST-shifted anomaly bar or data quality issue;
+            // in that case leave volScalar null so the row gets no label and is excluded from training.
+            if (rvAtCutoff.HasValue && rvAtCutoff.Value > 1e-5)
+            {
+                volScalar = rvAtCutoff.Value;
                 if (colIndex.TryGetValue($"{targetSafe}_TargetVolScalar", out var vsColIdx))
                     vals[vsColIdx] = volScalar;
             }
@@ -532,9 +619,9 @@ public static class Transformer
                     if (cNow > 0)
                     {
                         double rawReturn = Math.Log(cFuture / cNow);
-                        if (cfg.RealizedVolPeriod > 0 && volScalar.HasValue)
+                        if (hasVolScalar && volScalar.HasValue)
                             vals[retColIdx] = rawReturn / volScalar.Value;
-                        else if (cfg.RealizedVolPeriod == 0)
+                        else if (!hasVolScalar)
                             vals[retColIdx] = rawReturn;
                         // else: vol warm-up not met — leave null so row is excluded from training
                     }
@@ -1399,7 +1486,7 @@ public static class Transformer
     private static void WriteCrossAsset(
         double?[] vals, DateTime cutoff,
         SeriesData?[][] longSd, SeriesData?[][] shortSd,
-        double goldSilverZ, double goldOilZ,
+        double[] ratioZAtCutoff,
         int tltAi, int shyAi,
         int spyAi, int vixyAi, int udnAi,
         int tf4hLongTi, int tf1hShortTi,
@@ -1425,27 +1512,30 @@ public static class Transformer
 
         void Set(int xaIdx, double v) { if (xaCols[xaIdx] >= 0 && !double.IsNaN(v)) vals[xaCols[xaIdx]] = v; }
 
-        double tlt    = FloorClose(longSd, tltAi,  tf4hLongTi, cutoff);
-        double shy    = FloorClose(longSd, shyAi,  tf4hLongTi, cutoff);
+        // Configured ratios occupy the first N slots in xaCols
+        for (int ri = 0; ri < ratioZAtCutoff.Length; ri++)
+            Set(ri, ratioZAtCutoff[ri]);
 
-        Set(0, goldSilverZ);     // GoldSilverRatio (z-scored)
-        Set(1, goldOilZ);        // GoldOilRatio    (z-scored)
+        int fixedBase = ratioZAtCutoff.Length;
+
+        double tlt = FloorClose(longSd, tltAi, tf4hLongTi, cutoff);
+        double shy = FloorClose(longSd, shyAi, tf4hLongTi, cutoff);
 
         // DXY mom via UDN LogReturn — 1h short TF and 4h long TF
-        Set(2, FloorInd(shortSd, udnAi, tf1hShortTi, cutoff, indLogReturn)); // DXY_Mom_1h
-        Set(3, FloorInd(longSd,  udnAi, tf4hLongTi,  cutoff, indLogReturn)); // DXY_Mom_4h
+        Set(fixedBase + 0, FloorInd(shortSd, udnAi, tf1hShortTi, cutoff, indLogReturn)); // DXY_Mom_1h
+        Set(fixedBase + 1, FloorInd(longSd,  udnAi, tf4hLongTi,  cutoff, indLogReturn)); // DXY_Mom_4h
 
-        Set(4, shy > 0 ? tlt / shy : double.NaN);            // YieldCurveProxy
+        Set(fixedBase + 2, shy > 0 ? tlt / shy : double.NaN);  // YieldCurveProxy
 
         // RiskSentiment: SPY RSI - VIXY RSI
         double spyRsi  = FloorInd(longSd, spyAi,  tf4hLongTi, cutoff, indRsi);
         double vixyRsi = FloorInd(longSd, vixyAi, tf4hLongTi, cutoff, indRsi);
-        Set(5, !double.IsNaN(spyRsi) && !double.IsNaN(vixyRsi) ? spyRsi - vixyRsi : double.NaN);
+        Set(fixedBase + 3, !double.IsNaN(spyRsi) && !double.IsNaN(vixyRsi) ? spyRsi - vixyRsi : double.NaN);
 
         // VolatilityRegime: VIXY ATR/close bucketed into 0/1/2
         double vixyAtr = FloorInd(longSd, vixyAi, tf4hLongTi, cutoff, indAtr);
         if (!double.IsNaN(vixyAtr))
-            Set(6, vixyAtr < 0.02 ? 0.0 : vixyAtr < 0.05 ? 1.0 : 2.0);
+            Set(fixedBase + 4, vixyAtr < 0.02 ? 0.0 : vixyAtr < 0.05 ? 1.0 : 2.0);
     }
 
     // ── Private: indicator name generation ───────────────────────────────────

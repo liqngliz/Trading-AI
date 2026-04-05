@@ -72,6 +72,26 @@ public static class PredictRunner
         Console.WriteLine($"Model bucket  : {bucket.Label} ({bucket.Suffix})");
         Console.WriteLine();
 
+        // ── Read TargetVolScalar from last row (used to de-scale prediction) ────
+        // Key: targetCol name → vol scalar value (null if anomalous / warm-up not met)
+        var volScalars = new Dictionary<string, double?>(StringComparer.Ordinal);
+        foreach (var col in allCols.Where(c => c.Contains("_Target_") && c.EndsWith("_Return")))
+        {
+            // Corresponding TargetVolScalar column: strip "_Target_<tf>_Return" → "_TargetVolScalar"
+            var prefix = col[..col.IndexOf("_Target_", StringComparison.Ordinal)];
+            var vsCol  = prefix + "_TargetVolScalar";
+            double? vs = null;
+            if (colIndex.TryGetValue(vsCol, out var vsIdx)
+                && vsIdx < lastParts.Length
+                && !string.IsNullOrEmpty(lastParts[vsIdx])
+                && double.TryParse(lastParts[vsIdx], NumberStyles.Float, CultureInfo.InvariantCulture, out var vsVal)
+                && vsVal > 1e-5)
+            {
+                vs = vsVal;
+            }
+            volScalars[col] = vs;
+        }
+
         // ── Find all models for this bucket ───────────────────────────────────
         var modelFiles = Directory.GetFiles(modelDir, $"*_{bucket.Suffix}.zip")
             .OrderBy(f => f)
@@ -143,9 +163,21 @@ public static class PredictRunner
             var predicted = model.Transform(dataView);
             var score     = predicted.GetColumn<float>("Score").First();
 
+            volScalars.TryGetValue(meta.TargetColumn, out var curVol);
+            bool anomalous = curVol is null;
+
             Console.WriteLine($"┌─ {meta.TargetColumn}  [{bucket.Label}]");
             Console.WriteLine($"│  Score  : {score:+0.0000;-0.0000}  (vol-normalised log return)");
-            Console.WriteLine($"│  Signal : {(score > 0 ? "LONG  ▲" : "SHORT ▼")}");
+            if (!anomalous)
+            {
+                double expectedReturn = score * curVol!.Value;
+                Console.WriteLine($"│  Return : {expectedReturn:+0.0000%;-0.0000%}  (score × vol {curVol.Value:F5})");
+            }
+            else
+            {
+                Console.WriteLine($"│  Return : [UNRELIABLE — vol scalar missing or near-zero on this bar]");
+            }
+            Console.WriteLine($"│  Signal : {(score > 0 ? "LONG  ▲" : "SHORT ▼")}{(anomalous ? "  ⚠ anomalous bar" : "")}");
             Console.WriteLine($"└─ Model  : {Path.GetFileName(modelPath)}");
             Console.WriteLine();
         }
