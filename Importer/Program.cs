@@ -1,7 +1,6 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Text.Json;
 using Importer;
-using Indicators;
 using Integrations.TwelveData;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -95,22 +94,12 @@ void MarkUnavailable(string symbol, string reason)
 // Note: "1month" is excluded — variable month lengths cause cache timestamp misalignment.
 string[] intervals = ["15min", "30min", "1h", "4h", "1day", "1week"];
 
-// Transformer data: symbol → interval → sorted candles / indicator values
-var allCandles       = new Dictionary<string, Dictionary<string, List<TimeSeriesValue>>>(StringComparer.OrdinalIgnoreCase);
-var allIndicators    = new Dictionary<string, Dictionary<string, List<IndicatorValue>>>(StringComparer.OrdinalIgnoreCase);
-var commonStartByTf  = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-
-var fetchStart = new DateTime(1990, 1, 1, 0, 0, 0);
-var fetchEnd = DateTime.UtcNow.Date;
-
-var datasetRoot  = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset"));
-
 string[] symbols =
 [
     // Precious metals
     "XAU/USD", "XAG/USD", "XPT/USD", "XPD/USD",
     // Forex
-    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF", "USD/CNH", "USD/CNY", 
+    "EUR/USD", "GBP/USD", "USD/JPY", "USD/CAD", "USD/CHF", "USD/CNH", "USD/CNY",
     // ETFs
     // Removed (short history): "XMTH", "SUOD", "ZGLD", "WORLD"
     "SHY", "IEF", "TLT", "SPY", "QQQ", "EEM", "ZSL", "DGZ", "NDAQ", "IYY",
@@ -157,6 +146,11 @@ TwelveDataParam MakeIndicatorParam(string sym, TwelveDataEndpoint ep, string ivl
     interval: ivl,
     outputSize: 5000,
     indicatorRepository: indicatorRepository);
+
+var fetchStart = new DateTime(1990, 1, 1, 0, 0, 0);
+var fetchEnd = DateTime.UtcNow.Date;
+
+var datasetRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "Dataset"));
 
 foreach (var interval in intervals)
 {
@@ -209,10 +203,6 @@ foreach (var interval in intervals)
 
         trimmedBySymbol[symbol] = trimmed;
         Console.WriteLine($"  {symbol}: {trimmed.Count} candles  [{trimmed.Keys.Min():yyyy-MM-dd} → {trimmed.Keys.Max():yyyy-MM-dd}]");
-
-        if (!allCandles.TryGetValue(symbol, out var symCandlesByTf))
-            allCandles[symbol] = symCandlesByTf = new Dictionary<string, List<TimeSeriesValue>>(StringComparer.Ordinal);
-        symCandlesByTf[interval] = trimmed.Values.OrderBy(v => v.Datetime).ToList();
     }
 
     if (trimmedBySymbol.Count == 0)
@@ -224,7 +214,6 @@ foreach (var interval in intervals)
     // ── Common start: latest first non-filled candle across all datasets ──────
 
     var commonStart = trimmedBySymbol.Values.Max(c => c.Keys.Min());
-    commonStartByTf[interval] = commonStart;
     Console.WriteLine($"\nCommon start: {commonStart:yyyy-MM-dd}  ({trimmedBySymbol.Count}/{symbols.Length} symbols with data)");
 
     // ── Write per-symbol start dates to report (append each interval) ─────────
@@ -256,28 +245,7 @@ foreach (var interval in intervals)
 
         Console.WriteLine($"\n=== {symbol} ({candles.Count} candles) ===");
 
-        // ── Price indicators ──────────────────────────────────────────────────
-
-        Console.WriteLine($"  LogReturn:        {PriceIndicators.LogReturn(candles).Count}");
-        Console.WriteLine($"  SMA(20):          {PriceIndicators.Sma(candles, 20).Count}");
-        Console.WriteLine($"  EMA(20):          {PriceIndicators.Ema(candles, 20).Count}");
-        Console.WriteLine($"  RSI(14):          {PriceIndicators.Rsi(candles).Count}");
-        Console.WriteLine($"  ROC(1):           {PriceIndicators.Roc(candles).Count}");
-        Console.WriteLine($"  StdDev(20):       {PriceIndicators.RollingStdDev(candles, 20).Count}");
-        Console.WriteLine($"  ATR(14):          {PriceIndicators.Atr(candles).Count}");
-        Console.WriteLine($"  Bollinger(20):    {PriceIndicators.BollingerBands(candles).Count}");
-        Console.WriteLine($"  CCI(20):          {PriceIndicators.Cci(candles).Count}");
-        Console.WriteLine($"  WilliamsR(14):    {PriceIndicators.WilliamsR(candles).Count}");
-        Console.WriteLine($"  Stochastic:       {PriceIndicators.Stochastic(candles).Count}");
-        Console.WriteLine($"  MACD:             {PriceIndicators.Macd(candles).Count}");
-        Console.WriteLine($"  CandleRange:      {PriceIndicators.CandleRange(candles).Count}");
-        Console.WriteLine($"  BodySize:         {PriceIndicators.BodySize(candles).Count}");
-        Console.WriteLine($"  UpperWick:        {PriceIndicators.UpperWick(candles).Count}");
-        Console.WriteLine($"  LowerWick:        {PriceIndicators.LowerWick(candles).Count}");
-        Console.WriteLine($"  DistHighN(20):    {PriceIndicators.DistanceFromHighN(candles, 20).Count}");
-        Console.WriteLine($"  DistLowN(20):     {PriceIndicators.DistanceFromLowN(candles, 20).Count}");
-
-        // ── Volume indicators (API-computed, cached, trimmed) ─────────────────
+        // ── Volume indicators (API-computed, cached) ──────────────────────────
 
         foreach (var ep in volumeEndpoints)
         {
@@ -290,183 +258,22 @@ foreach (var interval in intervals)
                 _                        => ep.ToString().ToLowerInvariant()
             };
 
-            Dictionary<DateTime, IndicatorValue> rawIndicator;
             if (offlineMode)
             {
                 var bucketKey = $"{epPath}/{interval}";
                 var doc = await indicatorRepository.GetAsync(symbol, bucketKey);
-                rawIndicator = doc?.Data.TryGetValue(bucketKey, out var bucket) == true
-                    ? bucket.ToDictionary(
-                        kvp => DateTime.ParseExact(kvp.Key, "yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture),
-                        kvp => kvp.Value)
-                    : [];
+                var count = doc?.Data.TryGetValue(bucketKey, out var bucket) == true ? bucket.Count : 0;
+                Console.WriteLine($"  {ep,-8}: {count,8} (cached)");
             }
             else
             {
                 var indicatorStart = ep == TwelveDataEndpoint.Rvol ? rvolStart : commonStart;
-                rawIndicator = await TwelveDataIndicator.GetIndicator(MakeIndicatorParam(symbol, ep, interval, indicatorStart, fetchEnd));
+                var rawIndicator = await TwelveDataIndicator.GetIndicator(MakeIndicatorParam(symbol, ep, interval, indicatorStart, fetchEnd));
+                var indicator = rawIndicator.TrimLeadingAndTrailingFilledIndicators();
+                Console.WriteLine($"  {ep,-8}: {indicator.Count,8}");
             }
-
-            var indicator = rawIndicator.TrimLeadingAndTrailingFilledIndicators();
-            Console.WriteLine($"  {ep,-8}:         {indicator.Count}");
-
-            if (!allIndicators.TryGetValue(symbol, out var symIndsByKey))
-                allIndicators[symbol] = symIndsByKey = new Dictionary<string, List<IndicatorValue>>(StringComparer.Ordinal);
-            symIndsByKey[$"{epPath}/{interval}"] = indicator.Values.OrderBy(v => v.Datetime).ToList();
         }
     }
-}
-
-// ── Build ML datasets for each target horizon ─────────────────────────────────
-
-BuildHorizon(new DatasetConfig
-{
-    TargetSymbol    = "XAU/USD",
-    TargetHorizons  = [("4h", 1)],
-    ShortTimeframes = ["1h"],
-    LongTimeframes  = ["4h", "1day", "1week"],
-    BaseTimeframe   = "4h",
-    BaseName        = "xauusd_4h",
-    FeatureLag      = TimeSpan.FromHours(4),
-    RealizedVolConfig = new()
-    {
-        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
-        ["XAG/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["SPY"]     = new() { ["4h"] = [10, 20, 50] },
-    },
-});
-
-BuildHorizon(new DatasetConfig
-{
-    TargetSymbol    = "XAG/USD",
-    TargetHorizons  = [("4h", 1)],
-    ShortTimeframes = ["1h"],
-    LongTimeframes  = ["4h", "1day", "1week"],
-    BaseTimeframe   = "4h",
-    BaseName        = "xagusd_4h",
-    FeatureLag      = TimeSpan.FromHours(4),
-    Ratios          =
-    [
-        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
-        new("XAG/USD", "WTI/USD", "SilverOilRatio"),
-    ],
-    RealizedVolConfig = new()
-    {
-        ["XAG/USD"] = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
-        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
-    },
-});
-
-BuildHorizon(new DatasetConfig
-{
-    TargetSymbol    = "SPY",
-    TargetHorizons  = [("4h", 1)],
-    ShortTimeframes = ["1h"],
-    LongTimeframes  = ["4h", "1day", "1week"],
-    BaseTimeframe   = "4h",
-    BaseName        = "spy_4h",
-    FeatureLag      = TimeSpan.FromHours(4),
-    Ratios          =
-    [
-        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
-        new("XAU/USD", "WTI/USD", "GoldOilRatio"),
-        new("SPY",     "WTI/USD", "SpyOilRatio"),
-    ],
-    PruneKeywords = ["_min", "_max", "_mean"],
-    RealizedVolConfig = new()
-    {
-        ["SPY"]     = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
-        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["QQQ"]     = new() { ["4h"] = [10, 20, 50] },
-    },
-});
-
-BuildHorizon(new DatasetConfig
-{
-    TargetSymbol    = "QQQ",
-    TargetHorizons  = [("4h", 1)],
-    ShortTimeframes = ["1h"],
-    LongTimeframes  = ["4h", "1day", "1week"],
-    BaseTimeframe   = "4h",
-    BaseName        = "qqq_4h",
-    FeatureLag      = TimeSpan.FromHours(4),
-    Ratios          =
-    [
-        new("XAU/USD", "XAG/USD", "GoldSilverRatio"),
-        new("XAU/USD", "WTI/USD", "GoldOilRatio"),
-        new("QQQ",     "WTI/USD", "QqqOilRatio"),
-    ],
-    PruneKeywords = ["_min", "_max", "_mean"],
-    RealizedVolConfig = new()
-    {
-        ["QQQ"]     = new() { ["4h"] = [10, 20, 50], ["1day"] = [10, 20], ["1week"] = [10, 20] },
-        ["XAU/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["WTI/USD"] = new() { ["4h"] = [10, 20, 50] },
-        ["SPY"]     = new() { ["4h"] = [10, 20, 50] },
-    },
-});
-
-void BuildHorizon(DatasetConfig cfg)
-{
-    Console.WriteLine($"\n\n=== TRANSFORMER: building {cfg.BaseName} dataset ===");
-
-    // Training start = latest common start across this config's long timeframes
-    var start = cfg.LongTimeframes
-        .Where(commonStartByTf.ContainsKey)
-        .Select(tf => commonStartByTf[tf])
-        .DefaultIfEmpty()
-        .Max() is DateTime ts && ts != default ? (DateTime?)ts : null;
-
-    Console.WriteLine($"Training start:");
-    foreach (var tf in cfg.LongTimeframes)
-        if (commonStartByTf.TryGetValue(tf, out var d))
-            Console.WriteLine($"  {tf,-8} {d:yyyy-MM-dd}{(d == start ? "  ← binding" : "")}");
-
-    var outputDir = Path.Combine(datasetRoot, cfg.BaseName);
-    Directory.CreateDirectory(outputDir);
-
-    var fullCfg = new DatasetConfig
-    {
-        TargetSymbol      = cfg.TargetSymbol,
-        TargetHorizons    = cfg.TargetHorizons,
-        ShortTimeframes   = cfg.ShortTimeframes,
-        LongTimeframes    = cfg.LongTimeframes,
-        BaseTimeframe     = cfg.BaseTimeframe,
-        BaseName          = cfg.BaseName,
-        FeatureLag        = cfg.FeatureLag,
-        Ratios            = cfg.Ratios,
-        RealizedVolConfig = cfg.RealizedVolConfig,
-        VolRatioMaPeriods = cfg.VolRatioMaPeriods,
-        PruneKeywords     = cfg.PruneKeywords,
-        TrainingStartDate = start,
-        OutputDirectory   = outputDir,
-    };
-
-    var (rows, columns, _) = Transformer.BuildFeatureMatrix(fullCfg, allCandles, allIndicators);
-    if (rows.Count == 0) { Console.WriteLine($"  [SKIP] No rows produced for {cfg.BaseName}."); return; }
-    Console.WriteLine($"  Rows before pruning : {rows.Count}  Columns: {columns.Length}");
-
-    var csvPath            = Path.Combine(outputDir, $"{cfg.BaseName}_dataset.csv");
-    var reportPath         = Path.Combine(outputDir, $"{cfg.BaseName}_report.txt");
-    var nullReportPath     = Path.Combine(outputDir, $"{cfg.BaseName}_null_report.json");
-    var prunedColsPath     = Path.Combine(outputDir, $"{cfg.BaseName}_pruned_columns.txt");
-    var prunedKeywordsPath = Path.Combine(outputDir, $"{cfg.BaseName}_pruned_keywords.txt");
-
-    (rows, columns) = Transformer.PruneSparseCols(rows, columns, prunedColsPath, threshold: cfg.SparseColThreshold);
-    if (cfg.PruneKeywords.Length > 0)
-        (rows, columns) = Transformer.PruneByKeyword(rows, columns,
-            keywords:        cfg.PruneKeywords,
-            excludeKeywords: cfg.PruneExcludeKeywords,
-            reportPath:      prunedKeywordsPath);
-
-    Console.WriteLine($"  Rows after pruning  : {rows.Count}  Columns: {columns.Length}");
-    Transformer.ExportToCsv(rows, columns, csvPath);
-    Transformer.SplitByNanBucket(rows, columns, outputDir, baseName: $"{cfg.BaseName}_dataset");
-    Transformer.GenerateDatasetReport(rows, columns, reportPath);
-    Transformer.GenerateNullReport(rows, columns, nullReportPath);
 }
 
 Console.WriteLine($"\nCompleted in {sw.Elapsed:hh\\:mm\\:ss}.");

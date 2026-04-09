@@ -1,17 +1,16 @@
 using Predictor;
 
 // Usage:
-//   dotnet run -- --train   [--dataset /path/to/Dataset] [--folds N]
-//   dotnet run -- --retrain [--dataset /path/to/Dataset] [--folds N]
+//   dotnet run -- --train   [--dataset /path/to/Dataset] [--folds N] [--holdout-days N]
 //   dotnet run -- --predict [--dataset /path/to/Dataset]
 //
 // Scans every xauusd_* subfolder under the dataset root.
-// --train  : shuffles bucket CSVs, saves *_shuffled.csv, trains models
-// --retrain: reuses existing *_shuffled.csv (no re-shuffle); same as --train on first run
-// --predict: loads trained models and prints predictions for the latest bar
+// --train        : trains models and saves them to <subfolder>/Models/
+// --predict      : loads trained models and prints predictions for the latest bar
+// --holdout-days : holdout size as calendar days (default: 90)
+//                  e.g. --holdout-days 180  → last 180 days of data held out
 
-var mode = args.Contains("--train")   ? "train"
-         : args.Contains("--retrain") ? "retrain"
+var mode = args.Contains("--train") ? "train"
          : args.Contains("--predict") ? "predict"
          : "train"; // default to train if no mode specified
 
@@ -34,6 +33,24 @@ if (!Directory.Exists(datasetRoot))
     return 1;
 }
 
+// Holdout % per symbol/timeframe directory name prefix.
+// Key is matched as a case-insensitive prefix of the directory name (e.g. "xauusd_4h").
+// First match wins. Falls back to DefaultHoldoutPct if nothing matches.
+const double DefaultHoldoutPct = 0.15;
+var HoldoutConfig = new (string Prefix, double Pct)[]
+{
+    ("xauusd_1h",   0.15),
+    ("xauusd_1day", 0.15),
+    ("xauusd_1week",0.15),
+    ("xagusd_1h",   0.15),
+    ("xagusd_1day", 0.15),
+    ("xagusd_1week",0.15),
+    ("spy_1h",      0.15),
+    ("spy_1day",    0.15),
+    ("qqq_1h",      0.15),
+    ("qqq_1day",    0.15),
+};
+
 string[] horizonPatterns = ["xauusd_*", "xagusd_*", "spy_*", "qqq_*"];
 var horizonDirs = horizonPatterns
     .SelectMany(p => Directory.GetDirectories(datasetRoot, p))
@@ -46,12 +63,14 @@ if (horizonDirs.Length == 0)
     return 1;
 }
 
-if (mode is "train" or "retrain")
+if (mode == "train")
 {
-    bool retrain = mode == "retrain";
-    var numFolds = int.TryParse(GetArg(args, "--folds"), out var nf) ? nf : 6;
+    var numFolds    = int.TryParse(GetArg(args, "--folds"),        out var nf) ? nf : 6;
+    var holdoutDays = int.TryParse(GetArg(args, "--holdout-days"), out var hd) ? (int?)hd : 90;
+
     Console.WriteLine($"CV folds     : {numFolds}");
-    Console.WriteLine($"Retrain mode : {(retrain ? "yes (reuse existing shuffled CSVs)" : "no (re-shuffle)")}");
+    if (holdoutDays.HasValue)
+        Console.WriteLine($"Holdout      : {holdoutDays.Value} days (overrides per-symbol %)");
 
     foreach (var horizonDir in horizonDirs)
     {
@@ -61,7 +80,10 @@ if (mode is "train" or "retrain")
         Console.WriteLine($"Dataset : {horizonDir}");
         Console.WriteLine($"Models  : {modelDir}");
         Directory.CreateDirectory(modelDir);
-        ModelTrainer.Run(horizonDir, modelDir, numFolds, retrain);
+        var dirName    = Path.GetFileName(horizonDir);
+        var holdoutPct = HoldoutConfig.FirstOrDefault(h => dirName.StartsWith(h.Prefix, StringComparison.OrdinalIgnoreCase)).Pct;
+        if (holdoutPct == 0) holdoutPct = DefaultHoldoutPct;
+        ModelTrainer.Run(horizonDir, modelDir, numFolds, holdoutPct, purge: 1, embargo: 50, holdoutDays: holdoutDays);
     }
 }
 else

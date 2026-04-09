@@ -17,8 +17,6 @@ public static class ModelTrainer
     ];
 
     private const double Pass2FeatureFraction = 0.40;
-    private const double Pass3FeatureFraction = 0.20;
-    private const int    Pass4FeatureCount    = 20;
     private const int    MinRows              = 300;
 
     // ── Black swan exclusion windows ──────────────────────────────────────────
@@ -60,6 +58,13 @@ public static class ModelTrainer
         (new(2022,  2, 10), new(2022,  3, 25), "Russia-Ukraine War Outbreak",
             ["XAUUSD", "XAGUSD", "WTIUSD"]),
 
+        // ── 2026 Geopolitical shocks ──────────────────────────────────────────
+        // Liberation Day Apr 2 2026: sweeping US tariffs announced; global market rout
+        (new(2026,  3, 19), new(2026,  4,  9), "Liberation Day Tariff Shock",           null),
+        // US-Iran War / Strait of Hormuz closure Mar 12 2026: ~20% of global oil supply
+        // disrupted; energy, gold, equities in extreme dislocation; ongoing
+        (new(2026,  2, 26), new(2026,  7, 31), "US-Iran War / Strait of Hormuz Closure", null),
+
         // ── Oil specific ───────────────────────────────────────────────────────
         // Hurricane Katrina Aug 29 2005: 25% of US Gulf oil production offline
         (new(2005,  8, 15), new(2005,  9, 19), "Hurricane Katrina",
@@ -73,10 +78,6 @@ public static class ModelTrainer
         // Saudi-Russia price war + negative WTI Apr 20 2020 (after COVID window ends)
         (new(2020,  4,  6), new(2020,  5,  4), "WTI Negative Price",
             ["WTIUSD"]),
-
-        // ── Recent macro shocks ────────────────────────────────────────────────
-        // Liberation Day: US tariff shock Apr 2 2026; global equity/gold vol spike
-        (new(2026,  3, 19), new(2026,  4,  9), "Liberation Day Tariff Shock",       null),
     ];
 
     // targetPrefix: the safe-symbol prefix of the target column, e.g. "XAUUSD"
@@ -85,7 +86,8 @@ public static class ModelTrainer
             ts >= p.From && ts <= p.To &&
             (p.Assets is null || p.Assets.Any(a => targetPrefix.StartsWith(a, StringComparison.Ordinal))));
 
-    public static void Run(string datasetDir, string modelDir, int numFolds = 10, bool retrain = false)
+    public static void Run(string datasetDir, string modelDir, int numFolds = 10, double holdoutPct = 0.15,
+                           int purge = 1, int embargo = 50, int? holdoutDays = null)
     {
         var mlContext = new MLContext(seed: 42);
 
@@ -142,7 +144,10 @@ public static class ModelTrainer
                 Console.WriteLine($"\n── Bucket: {label} ({suffix}) ──────────────────────────");
 
                 var cols        = File.ReadLines(csvPath).First().Split(',');
-                var featureCols = cols.Skip(1).Where(c => !c.Contains("_Target_")).ToArray();
+                var featureCols = cols.Skip(1).Where(c =>
+                    !c.Contains("_Target_") &&
+                    !c.EndsWith("_BarClose", StringComparison.Ordinal) &&
+                    !c.EndsWith("_TargetVolScalar", StringComparison.Ordinal)).ToArray();
                 var colIndex    = cols.Select((n, i) => (n, i)).ToDictionary(x => x.n, x => x.i);
 
                 if (!colIndex.TryGetValue(targetCol, out var targetIdx))
@@ -156,11 +161,7 @@ public static class ModelTrainer
 
                 var sw = Stopwatch.StartNew();
 
-                // Shuffle all rows (Fisher-Yates, seed 42) then load from shuffled CSV.
-                // FastTree is order-agnostic; shuffling ensures the hold-out is a random
-                // mix of the dataset rather than the temporal tail.
-                var shuffledCsvPath = ShuffleCsvAndSave(csvPath, seed: 42, reuseExisting: retrain);
-                var (rawF, labels, timestamps) = LoadCsv(shuffledCsvPath, featureIdx, targetIdx);
+                var (rawF, labels, timestamps) = LoadCsv(csvPath, featureIdx, targetIdx);
                 if (labels.Length == 0)
                 {
                     Console.WriteLine($"  [SKIP] No labelled rows in {suffix} CSV.");
@@ -172,17 +173,23 @@ public static class ModelTrainer
                     continue;
                 }
 
-                // ── Hold-out split (random, not temporal) ────────────────────
-                // Rows are already shuffled, so slicing [cvSize..] gives a
-                // random 30 % of the full dataset — not the temporal last 30 %.
-                double holdoutPct = labels.Length < 10_000 ? 0.30 : 0.20;
-                int    hoSize     = (int)(labels.Length * holdoutPct);
+                // ── Hold-out split: last N days or last N% by time ───────────
+                int hoSize;
+                if (holdoutDays.HasValue && timestamps.Length > 0)
+                {
+                    var cutoff = timestamps.Last().AddDays(-holdoutDays.Value);
+                    hoSize = timestamps.Count(t => t >= cutoff);
+                }
+                else
+                {
+                    hoSize = (int)(labels.Length * holdoutPct);
+                }
                 int    cvSize     = labels.Length - hoSize;
-                var    cvRawF     = hoSize > 0 ? rawF[..cvSize]   : rawF;
-                var    cvLabels   = hoSize > 0 ? labels[..cvSize] : labels;
-                var    hoRawF     = hoSize > 0 ? rawF[cvSize..]   : [];
-                var    hoLabels   = hoSize > 0 ? labels[cvSize..] : [];
-                var    hoTs       = hoSize > 0 ? timestamps[cvSize..] : [];
+                var    cvRawF     = hoSize > 0 ? rawF[..cvSize]        : rawF;
+                var    cvLabels   = hoSize > 0 ? labels[..cvSize]      : labels;
+                var    hoRawF     = hoSize > 0 ? rawF[cvSize..]        : [];
+                var    hoLabels   = hoSize > 0 ? labels[cvSize..]      : [];
+                var    hoTs       = hoSize > 0 ? timestamps[cvSize..]  : [];
 
                 // ── Clean hold-out: exclude rows near black swan events ────────
                 var targetPrefix = targetCol.Contains('_') ? targetCol[..targetCol.IndexOf('_')] : targetCol;
@@ -198,6 +205,19 @@ public static class ModelTrainer
                 var summary = new List<string>();
                 void S(string line) { Console.WriteLine(line); summary.Add(line); }
 
+                // Summary header
+                S($"Target  : {targetCol}");
+                S($"Bucket  : {label} ({suffix})");
+                S($"Rows    : {labels.Length}  (CV={cvLabels.Length}  hold-out={hoLabels.Length})");
+                S($"Imputer : {imputer}");
+                S($"Folds   : {numFolds}  (walk-forward expanding window)");
+                S($"Purge   : {purge} bar(s)  |  Embargo: {embargo} bar(s)");
+                var holdoutDesc = holdoutDays.HasValue
+                    ? $"last {holdoutDays.Value} days ({hoSize} rows)"
+                    : $"last {holdoutPct:P0} by time  ({hoSize} rows)";
+                S($"Holdout : {holdoutDesc}");
+                S(new string('─', 70));
+
                 // ── Helper: slice raw feature arrays to a column subset ───────
                 float[][] SliceCols(float[][] data, int[] idx) =>
                     data.Select(row => idx.Select(i => row[i]).ToArray()).ToArray();
@@ -207,16 +227,15 @@ public static class ModelTrainer
 
                 // ── Pass 1: all features ──────────────────────────────────────
                 S($"\npass 1 ({featureCols.Length} features):");
-                var cvLines1 = RunCV(mlContext, imputer, cvRawF, cvLabels, featureCols, numFolds);
+                var cvLines1 = RunCV(mlContext, imputer, cvRawF, cvLabels, featureCols, numFolds, purge, embargo);
                 foreach (var l in cvLines1) S(l);
 
-                S($"\n  ── Pass 1 final model ──");
                 var (model1, hoRmse1, cvF1, hoF1) = TrainFinalModel(
                     mlContext, imputer, cvRawF, cvLabels, hoRawF, hoLabels, featureCols);
                 var (p1Ho, _) = FormatHoldOut(hoLabels, mlContext, model1, hoF1, featureCols.Length, sw);
-                Console.WriteLine(p1Ho); summary.Add(p1Ho);
+                S($"  Hold-out (pass 1): {p1Ho.Trim()}");
 
-                // ── Derive feature subsets from pass 1 gain ranking ───────────
+                // ── Derive pass 2 feature subset from pass 1 gain ranking ────
                 var gainRanking = GetGainRanking(model1, featureCols);
 
                 int keepN2       = Math.Max(1, (int)Math.Ceiling(featureCols.Length * Pass2FeatureFraction));
@@ -226,151 +245,135 @@ public static class ModelTrainer
                 var cvRawF2      = SliceCols(cvRawF, localIdx2);
                 var hoRawF2      = SliceCols(hoRawF, localIdx2);
 
-                int keepN3       = Math.Max(1, (int)Math.Ceiling(featureCols.Length * Pass3FeatureFraction));
-                var topIdx3      = gainRanking.Take(keepN3).Select(x => x.Idx).ToHashSet();
-                var featureCols3 = featureCols.Where((_, i) => topIdx3.Contains(i)).ToArray();
-                var localIdx3    = ColIndices(topIdx3);
-                var cvRawF3      = SliceCols(cvRawF, localIdx3);
-                var hoRawF3      = SliceCols(hoRawF, localIdx3);
-
-                int keepN4       = Math.Min(Pass4FeatureCount, featureCols.Length);
-                var topIdx4      = gainRanking.Take(keepN4).Select(x => x.Idx).ToHashSet();
-                var featureCols4 = featureCols.Where((_, i) => topIdx4.Contains(i)).ToArray();
-                var localIdx4    = ColIndices(topIdx4);
-                var cvRawF4      = SliceCols(cvRawF, localIdx4);
-                var hoRawF4      = SliceCols(hoRawF, localIdx4);
-
                 // ── Pass 2: top 40% ───────────────────────────────────────────
                 S($"\npass 2 (top {keepN2}/{featureCols.Length} = 40% features):");
-                var cvLines2 = RunCV(mlContext, imputer, cvRawF2, cvLabels, featureCols2, numFolds);
+                var cvLines2 = RunCV(mlContext, imputer, cvRawF2, cvLabels, featureCols2, numFolds, purge, embargo);
                 foreach (var l in cvLines2) S(l);
 
-                S($"\n  ── Pass 2 final model ──");
                 var (model2, hoRmse2, cvF2, hoF2) = TrainFinalModel(
                     mlContext, imputer, cvRawF2, cvLabels, hoRawF2, hoLabels, featureCols2);
                 var (p2Ho, _) = FormatHoldOut(hoLabels, mlContext, model2, hoF2, featureCols2.Length, sw);
-                Console.WriteLine(p2Ho); summary.Add(p2Ho);
-
-                // ── Pass 3: top 20% ───────────────────────────────────────────
-                S($"\npass 3 (top {keepN3}/{featureCols.Length} = 20% features):");
-                var cvLines3 = RunCV(mlContext, imputer, cvRawF3, cvLabels, featureCols3, numFolds);
-                foreach (var l in cvLines3) S(l);
-
-                S($"\n  ── Pass 3 final model ──");
-                var (model3, hoRmse3, cvF3, hoF3) = TrainFinalModel(
-                    mlContext, imputer, cvRawF3, cvLabels, hoRawF3, hoLabels, featureCols3);
-                var (p3Ho, _) = FormatHoldOut(hoLabels, mlContext, model3, hoF3, featureCols3.Length, sw);
-                Console.WriteLine(p3Ho); summary.Add(p3Ho);
-
-                // ── Pass 4: top 20 features ───────────────────────────────────
-                S($"\npass 4 (top {keepN4} features):");
-                var cvLines4 = RunCV(mlContext, imputer, cvRawF4, cvLabels, featureCols4, numFolds);
-                foreach (var l in cvLines4) S(l);
-
-                S($"\n  ── Pass 4 final model ──");
-                var (model4, hoRmse4, cvF4, hoF4) = TrainFinalModel(
-                    mlContext, imputer, cvRawF4, cvLabels, hoRawF4, hoLabels, featureCols4);
-                var (p4Ho, _) = FormatHoldOut(hoLabels, mlContext, model4, hoF4, featureCols4.Length, sw);
-                Console.WriteLine(p4Ho); summary.Add(p4Ho);
+                S($"  Hold-out (pass 2): {p2Ho.Trim()}");
 
                 // ── Pick winner ───────────────────────────────────────────────
-                double bestRmse = Math.Min(hoRmse1, Math.Min(hoRmse2, Math.Min(hoRmse3, hoRmse4)));
-                var winModel = bestRmse == hoRmse4 ? model4       : bestRmse == hoRmse3 ? model3       : bestRmse == hoRmse2 ? model2       : model1;
-                var winCols  = bestRmse == hoRmse4 ? featureCols4 : bestRmse == hoRmse3 ? featureCols3 : bestRmse == hoRmse2 ? featureCols2 : featureCols;
-                var winCvF   = bestRmse == hoRmse4 ? cvF4         : bestRmse == hoRmse3 ? cvF3         : bestRmse == hoRmse2 ? cvF2         : cvF1;
-                var winPass  = bestRmse == hoRmse4 ? "pass 4"     : bestRmse == hoRmse3 ? "pass 3"     : bestRmse == hoRmse2 ? "pass 2"     : "pass 1";
+                double bestRmse = Math.Min(hoRmse1, hoRmse2);
+                var winModel = bestRmse == hoRmse2 ? model2       : model1;
+                var winCols  = bestRmse == hoRmse2 ? featureCols2 : featureCols;
+                var winCvF   = bestRmse == hoRmse2 ? cvF2         : cvF1;
+                var winPass  = bestRmse == hoRmse2 ? "pass 2"     : "pass 1";
 
-                S($"\n  Winner: {winPass}  (hold-out RMSE pass1={hoRmse1:F6}  pass2={hoRmse2:F6}  pass3={hoRmse3:F6}  pass4={hoRmse4:F6})");
+                S($"\n{new string('─', 70)}");
+                S($"  {"Pass",-8} {"Features",10}  {"Hold-out RMSE",15}  {"Winner",8}");
+                S($"  {new string('─', 50)}");
+                S($"  {"pass 1",-8} {featureCols.Length,10}  {hoRmse1,15:F6}  {(winPass == "pass 1" ? "★" : "")}");
+                S($"  {"pass 2",-8} {keepN2,10}  {hoRmse2,15:F6}  {(winPass == "pass 2" ? "★" : "")}");
+                S($"  Winner : {winPass}  ({winCols.Length} features)");
 
                 // ── Clean hold-out evaluation (winner model) ──────────────────
-                var winHoLocalIdx = bestRmse == hoRmse4 ? localIdx4
-                                  : bestRmse == hoRmse3 ? localIdx3
-                                  : bestRmse == hoRmse2 ? localIdx2
+                var winHoLocalIdx = bestRmse == hoRmse2 ? localIdx2
                                   : Enumerable.Range(0, featureCols.Length).ToArray();
+                // Imputation reference: always the winning CV training set, never holdout data.
+                var winCvSliced = SliceCols(cvRawF, winHoLocalIdx);
+
+                S($"\n{new string('─', 70)}");
+                S($"  Hold-out evaluation  (winner: {winPass})");
+                S($"  {"Set",-35} {"RMSE",10}  {"MAE",10}  {"R²",7}");
+                S($"  {new string('─', 65)}");
+
+                // Random hold-out
+                string HoMetrics(float[] hLabels, float[][] hF) {
+                    if (hLabels.Length < 10) return $"  (too few rows: {hLabels.Length})";
+                    var hDv = ToDataView(mlContext, hF, hLabels, winCols.Length);
+                    var m   = mlContext.Regression.Evaluate(winModel.Transform(hDv), labelColumnName: "Label");
+                    return $"  {$"Random hold-out ({hLabels.Length} rows)",-35} {m.RootMeanSquaredError,10:F6}  {m.MeanAbsoluteError,10:F6}  {m.RSquared,7:F4}";
+                }
+                var (_, winHoF) = Impute(imputer, winCvSliced, SliceCols(hoRawF, winHoLocalIdx));
+                S(HoMetrics(hoLabels, winHoF));
+
+                // Clean hold-out
                 var cleanHoSliced = cleanHoRawF.Length > 0
                     ? cleanHoRawF.Select(row => winHoLocalIdx.Select(i => row[i]).ToArray()).ToArray()
                     : [];
-
-                S($"\n── Clean hold-out (black-swan rows excluded: {blackSwanCount}) ──");
+                double cleanHoldoutRmse = double.NaN;
                 if (cleanHoLabels.Length >= 10)
                 {
-                    var (cleanHoLine, cleanRmse) = FormatHoldOut(cleanHoLabels, mlContext, winModel,
-                        Impute(imputer, hoRawF.Select(row => winHoLocalIdx.Select(i => row[i]).ToArray()).ToArray(),
-                               cleanHoSliced).Other,
-                        winCols.Length, sw);
-                    S(cleanHoLine);
+                    var (_, cleanHoF) = Impute(imputer, winCvSliced, cleanHoSliced);
+                    var cleanDv  = ToDataView(mlContext, cleanHoF, cleanHoLabels, winCols.Length);
+                    var cleanM   = mlContext.Regression.Evaluate(winModel.Transform(cleanDv), labelColumnName: "Label");
+                    S($"  {$"Clean hold-out (excl. {blackSwanCount} BS rows)",-35} {cleanM.RootMeanSquaredError,10:F6}  {cleanM.MeanAbsoluteError,10:F6}  {cleanM.RSquared,7:F4}");
 
-                    // ── Black swan sensitivity warning ────────────────────────
-                    // fullRmse / cleanRmse: measures how much tail events inflate the hold-out error.
-                    //   < 1.2  → normal
-                    //   1.2–1.5 → mild (model struggles on extremes)
-                    //   > 1.5  → WARNING (strong tail sensitivity)
-                    //   > 2.0  → STRONG WARNING (model score dominated by tail events)
-                    if (!double.IsNaN(cleanRmse) && cleanRmse > 0 && !double.IsNaN(bestRmse))
+                    cleanHoldoutRmse = cleanM.RootMeanSquaredError;
+                    if (!double.IsNaN(cleanHoldoutRmse) && cleanHoldoutRmse > 0)
                     {
-                        double ratio = bestRmse / cleanRmse;
-                        string ratioStr = $"full/clean RMSE ratio = {ratio:F3}  ({bestRmse:F6} / {cleanRmse:F6})";
-                        if (ratio > 2.0)
-                            S($"\n  *** STRONG WARNING: {ratioStr}");
-                        else if (ratio > 1.5)
-                            S($"\n  ** WARNING: {ratioStr}");
-                        else if (ratio > 1.2)
-                            S($"\n  * MILD WARNING: {ratioStr}");
-                        else
-                            S($"\n  OK: {ratioStr}");
+                        double ratio = bestRmse / cleanHoldoutRmse;
+                        string tag = ratio > 2.0 ? "*** STRONG WARNING" : ratio > 1.5 ? "** WARNING" : ratio > 1.2 ? "* MILD" : "OK";
+                        S($"  Full/clean RMSE ratio = {ratio:F3}  [{tag}]");
                     }
                 }
-                else
-                {
-                    S($"  (too few clean rows: {cleanHoLabels.Length} — need ≥ 10)");
-                }
 
-                // ── Temporal hold-out (last 30% of original time-ordered data) ─
-                // Load the original (unshuffled) bucket CSV and take the last
-                // hoSize rows by time — gives a pure out-of-sample future window.
+                // Temporal hold-out
                 var (tempAllF, tempAllL, tempAllTs) = LoadCsv(csvPath, featureIdx, targetIdx);
-                int tempHoStart   = Math.Max(0, tempAllL.Length - hoSize);
-                var tempHoRawSliced = SliceCols(tempAllF[tempHoStart..], winHoLocalIdx);
-                var tempHoLabels    = tempAllL[tempHoStart..];
-                var winCvRawSliced  = SliceCols(cvRawF, winHoLocalIdx);
-
-                S($"\n── Temporal hold-out (last {holdoutPct:P0} by time, {tempHoLabels.Length} rows) ──");
+                int tempHoStart  = Math.Max(0, tempAllL.Length - hoSize);
+                var tempHoLabels = tempAllL[tempHoStart..];
+                var (_, tempHoF) = Impute(imputer, winCvSliced, SliceCols(tempAllF[tempHoStart..], winHoLocalIdx));
                 if (tempHoLabels.Length >= 10)
                 {
-                    var (tempHoLine, _) = FormatHoldOut(tempHoLabels, mlContext, winModel,
-                        Impute(imputer, winCvRawSliced, tempHoRawSliced).Other,
-                        winCols.Length, sw);
-                    S(tempHoLine);
+                    var tempDv = ToDataView(mlContext, tempHoF, tempHoLabels, winCols.Length);
+                    var tempM  = mlContext.Regression.Evaluate(winModel.Transform(tempDv), labelColumnName: "Label");
+                    S($"  {$"Temporal hold-out (last {holdoutPct:P0}, {tempHoLabels.Length} rows)",-35} {tempM.RootMeanSquaredError,10:F6}  {tempM.MeanAbsoluteError,10:F6}  {tempM.RSquared,7:F4}");
                 }
                 else
                 {
-                    S($"  (too few rows: {tempHoLabels.Length} — need ≥ 10)");
+                    S($"  {"Temporal hold-out",-35} (too few rows: {tempHoLabels.Length})");
                 }
 
-                // ── Black-swan hold-out (rows near BS events incl. Liberation Day)
-                // Evaluates model performance specifically during tail/crisis periods.
-                var bsIdx      = Enumerable.Range(0, tempAllL.Length)
+                // Black-swan hold-out: rows that are BOTH in the holdout window AND near a BS event
+                var bsIdx      = Enumerable.Range(tempHoStart, tempAllL.Length - tempHoStart)
                     .Where(i => tempAllTs.Length > i && IsNearBlackSwan(tempAllTs[i], targetPrefix))
                     .ToArray();
-                var bsHoRawSliced = SliceCols([.. bsIdx.Select(i => tempAllF[i])], winHoLocalIdx);
-                var bsHoLabels    = bsIdx.Select(i => tempAllL[i]).ToArray();
-
-                S($"\n── Black-swan hold-out ({bsHoLabels.Length} rows near BS events) ──");
+                var bsHoLabels = bsIdx.Select(i => tempAllL[i]).ToArray();
+                var bsHoSliced = SliceCols([.. bsIdx.Select(i => tempAllF[i])], winHoLocalIdx);
                 if (bsHoLabels.Length >= 10)
                 {
-                    var (bsHoLine, _) = FormatHoldOut(bsHoLabels, mlContext, winModel,
-                        Impute(imputer, winCvRawSliced, bsHoRawSliced).Other,
-                        winCols.Length, sw);
-                    S(bsHoLine);
+                    var (_, bsHoF) = Impute(imputer, winCvSliced, bsHoSliced);
+                    var bsDv = ToDataView(mlContext, bsHoF, bsHoLabels, winCols.Length);
+                    var bsM  = mlContext.Regression.Evaluate(winModel.Transform(bsDv), labelColumnName: "Label");
+                    S($"  {$"Black-swan hold-out ({bsHoLabels.Length} rows)",-35} {bsM.RootMeanSquaredError,10:F6}  {bsM.MeanAbsoluteError,10:F6}  {bsM.RSquared,7:F4}");
                 }
                 else
                 {
-                    S($"  (too few rows: {bsHoLabels.Length} — need ≥ 10)");
+                    S($"  {"Black-swan hold-out",-35} (too few rows: {bsHoLabels.Length})");
+                }
+
+                // Holdout chunks (5 equal temporal segments)
+                var tempHoAllF  = tempAllF[tempHoStart..];
+                var tempHoAllTs = tempAllTs.Length > tempHoStart ? tempAllTs[tempHoStart..] : [];
+                if (tempHoLabels.Length >= 10)
+                {
+                    const int NumChunks = 5;
+                    int chunkLen = tempHoLabels.Length / NumChunks;
+                    S($"\n  Holdout chunks ({NumChunks} × ~{chunkLen} rows):");
+                    S($"  {"Chunk",-6} {"From",-12} {"To",-12} {"Rows",5}   {"RMSE",10}  {"MAE",10}  {"R²",7}");
+                    S($"  {new string('─', 70)}");
+                    for (int c = 0; c < NumChunks; c++)
+                    {
+                        int cStart = c * chunkLen;
+                        int cEnd   = c == NumChunks - 1 ? tempHoLabels.Length : (c + 1) * chunkLen;
+                        var cLabels = tempHoLabels[cStart..cEnd];
+                        var cF      = SliceCols(tempHoAllF[cStart..cEnd], winHoLocalIdx);
+                        var (_, cImpF) = Impute(imputer, winCvSliced, cF);
+                        var cDv = ToDataView(mlContext, cImpF, cLabels, winCols.Length);
+                        var cM  = mlContext.Regression.Evaluate(winModel.Transform(cDv), labelColumnName: "Label");
+                        string fromStr = tempHoAllTs.Length > cStart ? tempHoAllTs[cStart].ToString("yyyy-MM-dd") : "?";
+                        string toStr   = tempHoAllTs.Length > cEnd - 1 ? tempHoAllTs[cEnd - 1].ToString("yyyy-MM-dd") : "?";
+                        S($"  {c + 1,-6} {fromStr,-12} {toStr,-12} {cLabels.Length,5}   {cM.RootMeanSquaredError,10:F6}  {cM.MeanAbsoluteError,10:F6}  {cM.RSquared,7:F4}");
+                    }
                 }
 
                 sw.Stop();
+                S($"\n  Total training time: {sw.Elapsed.TotalSeconds:F1}s");
 
-                // ── Top 30 features of winner ─────────────────────────────────
+                // ── Top 30 features of winner model ───────────────────────────
                 summary.Add($"\nTop 30 features ({winPass}):");
                 summary.Add($"  {"#",-4} {"Feature",-55} {"Gain",10}  {"Corr",7}");
                 summary.Add($"  {new string('-', 82)}");
@@ -383,12 +386,21 @@ public static class ModelTrainer
                     summary.Add($"  {i + 1,-4} {fname,-55} {top30[i].Score,10:F4}  {corrStr}");
                 }
 
-                // ── Save winner ───────────────────────────────────────────────
+                // ── Save winner model ─────────────────────────────────────────
                 var modelName = $"{targetCol}_{suffix}";
                 var modelPath = Path.Combine(modelDir, $"{modelName}.zip");
-                var winDv     = ToDataView(mlContext, winCvF, cvLabels, winCols.Length);
-                mlContext.Model.Save(winModel, winDv.Schema, modelPath);
+                var prodDv    = ToDataView(mlContext, winCvF, cvLabels, winCols.Length);
+                mlContext.Model.Save(winModel, prodDv.Schema, modelPath);
                 Console.WriteLine($"  Saved → {modelPath}");
+
+                var (featMean, featStd) = ComputeFeatureStats(winCvF);
+
+                // Build gain array aligned to winCols order (0.0 for features not in ranking)
+                var gainRankFinal = GetGainRanking(winModel, winCols);
+                var gainByIdx     = gainRankFinal.ToDictionary(x => x.Idx, x => (double)x.Score);
+                var featGain      = Enumerable.Range(0, winCols.Length)
+                                              .Select(i => gainByIdx.GetValueOrDefault(i, 0.0))
+                                              .ToArray();
 
                 var metaPath = Path.ChangeExtension(modelPath, ".features.json");
                 File.WriteAllText(metaPath, JsonSerializer.Serialize(
@@ -397,7 +409,10 @@ public static class ModelTrainer
                         TargetColumn   = targetCol,
                         NanBucket      = suffix,
                         Imputer        = imputer,
-                        FeatureColumns = winCols
+                        FeatureColumns = winCols,
+                        FeatureMean    = featMean,
+                        FeatureStd     = featStd,
+                        FeatureGain    = featGain,
                     },
                     new JsonSerializerOptions { WriteIndented = true }));
                 Console.WriteLine($"  Saved → {metaPath}");
@@ -409,6 +424,19 @@ public static class ModelTrainer
                 var summaryPath = Path.ChangeExtension(modelPath, ".training_summary.txt");
                 File.WriteAllLines(summaryPath, summary);
                 Console.WriteLine($"  Saved → {summaryPath}");
+
+                // Release large arrays before next bucket/target iteration
+                rawF       = null!;
+                cvRawF     = null!;
+                hoRawF     = null!;
+                cvRawF2    = null!;
+                hoRawF2    = null!;
+                winCvF     = null!;
+                winCvSliced = null!;
+                model1     = null!;
+                model2     = null!;
+                winModel   = null!;
+                GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
             }
         }
 
@@ -424,7 +452,9 @@ public static class ModelTrainer
         float[][]  cvRawF,
         float[]    cvLabels,
         string[]   featureCols,
-        int        numFolds)
+        int        numFolds,
+        int        purge   = 1,
+        int        embargo = 50)
     {
         var lines    = new List<string>();
         var cvRmse   = new List<double>();
@@ -433,7 +463,7 @@ public static class ModelTrainer
         var foldRows = new List<(int FoldNum, int TrainLen, int ValLen)>();
         int foldNum  = 0;
 
-        foreach (var (rawTrainF, trainL, rawValF, valL) in WalkForwardSplit(cvRawF, cvLabels, numFolds))
+        foreach (var (rawTrainF, trainL, rawValF, valL) in WalkForwardSplit(cvRawF, cvLabels, numFolds, purge, embargo))
         {
             foldNum++;
             Console.WriteLine($"\n  ── Fold {foldNum}/{numFolds}  train={trainL.Length}  val={valL.Length} ──");
@@ -505,19 +535,38 @@ public static class ModelTrainer
         ITransformer model,
         float[][]    hoF,
         int          numFeatures,
-        Stopwatch    sw)
+        Stopwatch    sw) // sw kept for signature compat but no longer printed per-line
     {
         if (hoLabels.Length > 0 && hoF.Length > 0)
         {
             var hoDv    = ToDataView(mlContext, hoF, hoLabels, numFeatures);
             var metrics = mlContext.Regression.Evaluate(model.Transform(hoDv), labelColumnName: "Label");
             return (
-                $"  Hold-out  RMSE={metrics.RootMeanSquaredError:F6}  " +
-                $"MAE={metrics.MeanAbsoluteError:F6}  " +
-                $"R²={metrics.RSquared:F4}  ({sw.Elapsed.TotalSeconds:F1}s)",
+                $"RMSE={metrics.RootMeanSquaredError:F6}  MAE={metrics.MeanAbsoluteError:F6}  R²={metrics.RSquared:F4}",
                 metrics.RootMeanSquaredError);
         }
         return ($"  (no hold-out rows)  ({sw.Elapsed.TotalSeconds:F1}s)", double.NaN);
+    }
+
+    // ── Feature distribution stats (for drift detection) ─────────────────────
+
+    private static (double[] Mean, double[] Std) ComputeFeatureStats(float[][] data)
+    {
+        if (data.Length == 0) return ([], []);
+        int n = data[0].Length;
+        var mean = new double[n];
+        var std  = new double[n];
+        for (int f = 0; f < n; f++)
+        {
+            double sum = 0; int count = 0;
+            foreach (var row in data) if (!float.IsNaN(row[f])) { sum += row[f]; count++; }
+            mean[f] = count > 0 ? sum / count : 0;
+            double sum2 = 0;
+            foreach (var row in data) if (!float.IsNaN(row[f])) sum2 += (row[f] - mean[f]) * (row[f] - mean[f]);
+            std[f] = count > 1 ? Math.Sqrt(sum2 / (count - 1)) : 1.0;
+            if (std[f] < 1e-9) std[f] = 1.0;
+        }
+        return (mean, std);
     }
 
     // ── Gain ranking ──────────────────────────────────────────────────────────
@@ -534,10 +583,24 @@ public static class ModelTrainer
             .ToArray();
     }
 
-    // ── Walk-forward split ────────────────────────────────────────────────────
+    // ── Walk-forward split with purge + embargo ───────────────────────────────
+    //
+    //  purge   : remove the last `purge` rows from training.
+    //            These rows have labels (future returns) that overlap the val window.
+    //            For barsAhead=1 target, purge=1.
+    //
+    //  embargo : skip `embargo` rows after the purge zone before val starts.
+    //            These rows have features (e.g. RealizedVol_50) computed using
+    //            data from the val window. Set to max feature lookback (50 bars).
+    //
+    //  Timeline:
+    //    [─────────── train ──────────][purge][embargo][─── val ───]
+    //
+    //  If purge+embargo would leave val empty the fold is silently skipped.
 
     private static IEnumerable<(float[][] TrainF, float[] TrainL, float[][] ValF, float[] ValL)>
-        WalkForwardSplit(float[][] features, float[] labels, int numFolds)
+        WalkForwardSplit(float[][] features, float[] labels, int numFolds,
+                         int purge = 1, int embargo = 50)
     {
         int n         = labels.Length;
         int chunkSize = n / (numFolds + 1);
@@ -545,10 +608,17 @@ public static class ModelTrainer
 
         for (int fold = 0; fold < numFolds; fold++)
         {
-            int trainEnd = (fold + 1) * chunkSize;
-            int valStart = trainEnd;
-            int valEnd   = fold == numFolds - 1 ? n : (fold + 2) * chunkSize;
-            if (valStart >= valEnd) yield break;
+            int rawTrainEnd = (fold + 1) * chunkSize;
+            int rawValEnd   = fold == numFolds - 1 ? n : (fold + 2) * chunkSize;
+
+            // Purge: shorten training set so labels don't overlap val
+            int trainEnd = Math.Max(0, rawTrainEnd - purge);
+
+            // Embargo: skip rows whose features were computed with val data
+            int valStart = rawTrainEnd + embargo;
+            int valEnd   = rawValEnd;
+
+            if (trainEnd == 0 || valStart >= valEnd) continue;
 
             yield return (
                 features[..trainEnd],
@@ -576,36 +646,6 @@ public static class ModelTrainer
             imp.Fit(trainRaw);
             return (imp.Transform(trainRaw), otherRaw.Length > 0 ? imp.Transform(otherRaw) : []);
         }
-    }
-
-    // Shuffles all labeled rows in csvPath (Fisher-Yates, fixed seed) and writes
-    // the result to <csvPath without .csv>_shuffled.csv. Returns the shuffled path.
-    private static string ShuffleCsvAndSave(string csvPath, int seed, bool reuseExisting = false)
-    {
-        var shuffledPath = Path.ChangeExtension(csvPath, null) + "_shuffled.csv";
-        if (reuseExisting && File.Exists(shuffledPath))
-        {
-            Console.WriteLine($"  [retrain] Reusing existing shuffled CSV: {Path.GetFileName(shuffledPath)}");
-            return shuffledPath;
-        }
-
-        var allLines  = File.ReadAllLines(csvPath);
-        var header    = allLines[0];
-        var dataLines = allLines.Skip(1).Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
-
-        var rng = new Random(seed);
-        for (int i = dataLines.Length - 1; i > 0; i--)
-        {
-            int j = rng.Next(i + 1);
-            (dataLines[i], dataLines[j]) = (dataLines[j], dataLines[i]);
-        }
-
-        using var sw = new StreamWriter(shuffledPath, append: false, System.Text.Encoding.UTF8);
-        sw.WriteLine(header);
-        foreach (var line in dataLines)
-            sw.WriteLine(line);
-
-        return shuffledPath;
     }
 
     internal static (float[][] Features, float[] Labels, DateTime[] Timestamps) LoadCsv(
@@ -743,4 +783,5 @@ public static class ModelTrainer
                 LearningRate               = 0.05,
                 NumberOfTrees              = 500,
             });
+
 }

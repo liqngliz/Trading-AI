@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\integrations\integrations.csproj" />
-    <ProjectReference Include="..\Indicators\Indicators.csproj" />
   </ItemGroup>
 
   <ItemGroup>

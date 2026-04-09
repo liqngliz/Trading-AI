@@ -56,6 +56,27 @@ public static class PredictRunner
         var lastParts     = recentLines[^1].Split(',');
         var barTimestamp  = lastParts.Length > 0 ? lastParts[0] : "?";
 
+        // ── Derive bar end from base timeframe in directory name ──────────────
+        var dirName   = Path.GetFileName(datasetDir);
+        var barEnd    = "?";
+        if (DateTime.TryParseExact(barTimestamp, "yyyy-MM-dd HH:mm:ss",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var barStart))
+        {
+            var step = dirName switch
+            {
+                var d when d.EndsWith("_1week", StringComparison.OrdinalIgnoreCase) => TimeSpan.FromDays(7),
+                var d when d.EndsWith("_1day",  StringComparison.OrdinalIgnoreCase) => TimeSpan.FromDays(1),
+                var d when d.EndsWith("_12h",   StringComparison.OrdinalIgnoreCase) => TimeSpan.FromHours(12),
+                var d when d.EndsWith("_4h",    StringComparison.OrdinalIgnoreCase) => TimeSpan.FromHours(4),
+                var d when d.EndsWith("_1h",    StringComparison.OrdinalIgnoreCase) => TimeSpan.FromHours(1),
+                var d when d.EndsWith("_30min", StringComparison.OrdinalIgnoreCase) => TimeSpan.FromMinutes(30),
+                var d when d.EndsWith("_15min", StringComparison.OrdinalIgnoreCase) => TimeSpan.FromMinutes(15),
+                _ => TimeSpan.Zero,
+            };
+            if (step > TimeSpan.Zero)
+                barEnd = (barStart + step).ToString("yyyy-MM-dd HH:mm:ss");
+        }
+
         // ── Compute NaN rate of the last row (all feature columns) ────────────
         int nanCount = featureCols.Count(c =>
         {
@@ -64,7 +85,8 @@ public static class PredictRunner
         });
         double nanPct = featureCols.Length > 0 ? (double)nanCount / featureCols.Length : 1.0;
 
-        Console.WriteLine($"Bar           : {barTimestamp}");
+        Console.WriteLine($"Bar start     : {barTimestamp}");
+        Console.WriteLine($"Bar end       : {barEnd}");
         Console.WriteLine($"Feature NaN   : {nanCount}/{featureCols.Length}  ({nanPct:P1})");
 
         // Select the tightest bucket that covers the query row's NaN rate
@@ -72,14 +94,16 @@ public static class PredictRunner
         Console.WriteLine($"Model bucket  : {bucket.Label} ({bucket.Suffix})");
         Console.WriteLine();
 
-        // ── Read TargetVolScalar from last row (used to de-scale prediction) ────
+        // ── Read TargetVolScalar and BarClose from last row ───────────────────
         // Key: targetCol name → vol scalar value (null if anomalous / warm-up not met)
         var volScalars = new Dictionary<string, double?>(StringComparer.Ordinal);
+        var barCloses  = new Dictionary<string, double?>(StringComparer.Ordinal);
         foreach (var col in allCols.Where(c => c.Contains("_Target_") && c.EndsWith("_Return")))
         {
-            // Corresponding TargetVolScalar column: strip "_Target_<tf>_Return" → "_TargetVolScalar"
             var prefix = col[..col.IndexOf("_Target_", StringComparison.Ordinal)];
-            var vsCol  = prefix + "_TargetVolScalar";
+
+            // TargetVolScalar
+            var vsCol = prefix + "_TargetVolScalar";
             double? vs = null;
             if (colIndex.TryGetValue(vsCol, out var vsIdx)
                 && vsIdx < lastParts.Length
@@ -90,6 +114,23 @@ public static class PredictRunner
                 vs = vsVal;
             }
             volScalars[col] = vs;
+
+            // BarClose: try each base timeframe suffix
+            double? bc = null;
+            foreach (var tf in new[] { "4h", "1day", "1week", "12h", "1h", "30min" })
+            {
+                var bcCol = $"{prefix}_{tf}_BarClose";
+                if (colIndex.TryGetValue(bcCol, out var bcIdx)
+                    && bcIdx < lastParts.Length
+                    && !string.IsNullOrEmpty(lastParts[bcIdx])
+                    && double.TryParse(lastParts[bcIdx], NumberStyles.Float, CultureInfo.InvariantCulture, out var bcVal)
+                    && bcVal > 0)
+                {
+                    bc = bcVal;
+                    break;
+                }
+            }
+            barCloses[col] = bc;
         }
 
         // ── Find all models for this bucket ───────────────────────────────────
@@ -163,7 +204,46 @@ public static class PredictRunner
             var predicted = model.Transform(dataView);
             var score     = predicted.GetColumn<float>("Score").First();
 
+            // ── Drift detection (importance-weighted) ─────────────────────────
+            string driftLine = "";
+            if (meta.FeatureMean.Length == imputedQuery[0].Length &&
+                meta.FeatureStd.Length  == imputedQuery[0].Length)
+            {
+                bool hasGains    = meta.FeatureGain.Length == imputedQuery[0].Length;
+                double totalWeight = 0.0;
+                double driftWeight = 0.0;
+                var topDrift = new List<(double Z, double Gain, string Name)>();
+
+                for (int f = 0; f < imputedQuery[0].Length; f++)
+                {
+                    double gain   = hasGains ? meta.FeatureGain[f] : 1.0;
+                    double z      = meta.FeatureStd[f] > 0
+                                    ? Math.Abs((imputedQuery[0][f] - meta.FeatureMean[f]) / meta.FeatureStd[f])
+                                    : 0.0;
+                    totalWeight += gain;
+                    if (z > 3.0)
+                    {
+                        driftWeight += gain;
+                        topDrift.Add((z, gain, meta.FeatureColumns[f]));
+                    }
+                }
+
+                double driftPct = totalWeight > 0 ? 100.0 * driftWeight / totalWeight : 0.0;
+                string driftTag = driftPct > 20 ? "⚠ MODEL UNRELIABLE"
+                                : driftPct > 10 ? "⚠ CAUTION"
+                                : "OK";
+                string weightedNote = hasGains ? " (gain-weighted)" : "";
+                driftLine = $"│  Drift  : {driftPct:F1}%{weightedNote} >3σ  [{driftTag}]";
+                if (topDrift.Count > 0)
+                {
+                    var top3 = topDrift.OrderByDescending(x => x.Z).Take(3)
+                                       .Select(x => $"{x.Name} (z={x.Z:F1}{(hasGains ? $", gain={x.Gain:F3}" : "")})");
+                    driftLine += $"\n│           Top outliers: {string.Join(", ", top3)}";
+                }
+            }
+
             volScalars.TryGetValue(meta.TargetColumn, out var curVol);
+            barCloses.TryGetValue(meta.TargetColumn, out var startPrice);
             bool anomalous = curVol is null;
 
             Console.WriteLine($"┌─ {meta.TargetColumn}  [{bucket.Label}]");
@@ -172,12 +252,20 @@ public static class PredictRunner
             {
                 double expectedReturn = score * curVol!.Value;
                 Console.WriteLine($"│  Return : {expectedReturn:+0.0000%;-0.0000%}  (score × vol {curVol.Value:F5})");
+                if (startPrice.HasValue)
+                {
+                    double endPrice = startPrice.Value * Math.Exp(expectedReturn);
+                    Console.WriteLine($"│  Price  : {startPrice.Value:F4}  →  {endPrice:F4}  ({(endPrice >= startPrice.Value ? "+" : "")}{endPrice - startPrice.Value:F4})");
+                }
             }
             else
             {
                 Console.WriteLine($"│  Return : [UNRELIABLE — vol scalar missing or near-zero on this bar]");
+                if (startPrice.HasValue)
+                    Console.WriteLine($"│  Price  : {startPrice.Value:F4}  →  ?");
             }
             Console.WriteLine($"│  Signal : {(score > 0 ? "LONG  ▲" : "SHORT ▼")}{(anomalous ? "  ⚠ anomalous bar" : "")}");
+            if (!string.IsNullOrEmpty(driftLine)) Console.WriteLine(driftLine);
             Console.WriteLine($"└─ Model  : {Path.GetFileName(modelPath)}");
             Console.WriteLine();
         }

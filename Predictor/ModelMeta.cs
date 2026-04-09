@@ -12,4 +12,10 @@ public sealed class ModelMeta
     /// <summary>Imputer used at training time: "knn" or "mean".</summary>
     public string   Imputer        { get; set; } = "knn";
     public string[] FeatureColumns { get; set; } = [];
+    /// <summary>Per-feature mean of the winning CV training set (post-imputation). Used for drift detection.</summary>
+    public double[] FeatureMean    { get; set; } = [];
+    /// <summary>Per-feature std-dev of the winning CV training set (post-imputation). Used for drift detection.</summary>
+    public double[] FeatureStd     { get; set; } = [];
+    /// <summary>Per-feature normalised gain from the final production model (max = 1.0). Used for importance-weighted drift.</summary>
+    public double[] FeatureGain    { get; set; } = [];
 }
